@@ -57,6 +57,14 @@ npm run demo
 # (지표 API 구현 전에는 해당 항목이 FAIL(HTTP 404)로 표시된다)
 ```
 
+> demo의 기대값은 "고정 데이터셋만 적재된 상태" 기준이다. E2E 실행(`npm run
+> test:e2e`)이나 생성기 데이터가 남아 있으면 아래로 초기화 후 다시 seed한다:
+>
+> ```bash
+> docker exec rusheight-test-db-1 psql -U app -d gamelogs -c "TRUNCATE purchases, game_events"
+> npm run seed
+> ```
+
 ### 2) 임의 데이터 생성기 (부하·시나리오 재현용)
 
 ```bash

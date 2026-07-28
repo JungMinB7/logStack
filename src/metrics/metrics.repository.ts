@@ -135,4 +135,148 @@ export class MetricsRepository {
       ORDER BY d.day ASC
     `);
   }
+
+  /**
+   * §9.3 일별 매출/활성 유저 — 매출 = SUM(amount_minor).
+   * amount_minor는 주문 총액이므로 quantity를 다시 곱하지 않는다 [A-28].
+   * 통화별 분리 집계(currency 필터) — 통화 간 합산 금지 (AI_RULES 5).
+   * revenue_minor는 ::bigint 캐스팅 → Prisma가 BigInt로 반환 (Service에서 문자열 변환).
+   */
+  async revenueByDay(
+    start: string,
+    end: string,
+    currency: string,
+  ): Promise<Array<{ day: Date; revenue_minor: bigint; active_users: number }>> {
+    return this.prisma.$queryRaw(Prisma.sql`
+      WITH days AS (
+        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+      ),
+      daily_active AS (
+        -- §9.1: 일별 활성 유저 (ARPU 분모 — ARPPU 아님, AI_RULES 7)
+        SELECT (occurred_at AT TIME ZONE 'UTC')::date AS day,
+               COUNT(DISTINCT user_id)::int AS active_users
+        FROM game_events
+        WHERE event_type = 'session_login'
+          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+        GROUP BY 1
+      ),
+      daily_revenue AS (
+        -- §9.3: 일별 매출 합계 (반개구간, occurred_at 기준)
+        SELECT (occurred_at AT TIME ZONE 'UTC')::date AS day,
+               SUM(amount_minor)::bigint AS revenue_minor
+        FROM purchases
+        WHERE currency = ${currency}
+          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+        GROUP BY 1
+      )
+      SELECT d.day AS day,
+             COALESCE(r.revenue_minor, 0)::bigint AS revenue_minor,
+             COALESCE(a.active_users, 0)          AS active_users
+      FROM days d
+      LEFT JOIN daily_revenue r ON r.day = d.day
+      LEFT JOIN daily_active a  ON a.day = d.day
+      ORDER BY d.day ASC
+    `);
+  }
+
+  /** §9.3 summary — 기간 전체 매출 합계 (통화 필터, 반개구간) */
+  async revenueTotal(
+    start: string,
+    end: string,
+    currency: string,
+  ): Promise<bigint> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ revenue_minor: bigint }>
+    >(Prisma.sql`
+      SELECT COALESCE(SUM(amount_minor), 0)::bigint AS revenue_minor
+      FROM purchases
+      WHERE currency = ${currency}
+        AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+        AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+    `);
+    return rows[0]?.revenue_minor ?? 0n;
+  }
+
+  /**
+   * §9.4 일별 결제 전환율 재료 — 분자는 단순 결제 유저 수가 아니라
+   * |결제 유저 ∩ 같은 일자 활성 유저| (LEFT JOIN 후 COUNT(p.user_id) = 교집합).
+   * 전일 로그인 + 당일 결제(자정 걸친 세션) 유저는 당일 분자에서 제외되어
+   * 0~1 범위가 구조적으로 보장된다. amount_minor=0 결제도 포함 [A-29].
+   */
+  async conversionByDay(
+    start: string,
+    end: string,
+  ): Promise<Array<{ day: Date; paying_users: number; active_users: number }>> {
+    return this.prisma.$queryRaw(Prisma.sql`
+      WITH days AS (
+        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+      ),
+      daily_active AS (
+        SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day, user_id
+        FROM game_events
+        WHERE event_type = 'session_login'
+          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+      ),
+      daily_paying AS (
+        -- amount_minor 조건 없음: 0원 결제(무료 프로모션)도 PU 포함 [A-29]
+        SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day, user_id
+        FROM purchases
+        WHERE occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+      ),
+      counts AS (
+        -- 분자 = 활성 유저 집합과의 교집합 (활성 유저 기준 LEFT JOIN이므로
+        -- 활성이 아닌 결제 유저는 집계되지 않는다)
+        SELECT a.day,
+               COUNT(*)::int AS active_users,
+               COUNT(p.user_id)::int AS paying_users
+        FROM daily_active a
+        LEFT JOIN daily_paying p ON p.day = a.day AND p.user_id = a.user_id
+        GROUP BY a.day
+      )
+      SELECT d.day AS day,
+             COALESCE(c.paying_users, 0) AS paying_users,
+             COALESCE(c.active_users, 0) AS active_users
+      FROM days d
+      LEFT JOIN counts c ON c.day = d.day
+      ORDER BY d.day ASC
+    `);
+  }
+
+  /**
+   * §9.4 summary — 기간 전체 고유 유저로 재계산 (일별 비율의 평균 금지, AI_RULES 8).
+   * 분자는 EXISTS로 "기간 내 로그인한 적 있는 결제 유저"만 센다 (교집합).
+   */
+  async conversionTotals(
+    start: string,
+    end: string,
+  ): Promise<{ paying_users: number; active_users: number }> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ paying_users: number; active_users: number }>
+    >(Prisma.sql`
+      SELECT
+        (SELECT COUNT(DISTINCT user_id)::int
+         FROM game_events
+         WHERE event_type = 'session_login'
+           AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+           AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+        ) AS active_users,
+        (SELECT COUNT(DISTINCT p.user_id)::int
+         FROM purchases p
+         WHERE p.occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+           AND p.occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+           AND EXISTS (
+             SELECT 1 FROM game_events g
+             WHERE g.event_type = 'session_login'
+               AND g.user_id = p.user_id
+               AND g.occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+               AND g.occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+           )
+        ) AS paying_users
+    `);
+    return rows[0] ?? { paying_users: 0, active_users: 0 };
+  }
 }

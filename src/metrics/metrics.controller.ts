@@ -1,8 +1,14 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AdminApiKeyGuard } from '../auth/admin-api-key.guard';
 import { MetricsQueryDto } from './dto/metrics-query.dto';
+import { RevenueQueryDto } from './dto/revenue-query.dto';
 import { MetricsService } from './metrics.service';
-import type { DauResponse, RetentionResponse } from './metrics.types';
+import type {
+  ConversionResponse,
+  DauResponse,
+  RetentionResponse,
+  RevenueResponse,
+} from './metrics.types';
 
 /**
  * 지표 조회 API (docs/api.openapi.yaml — metrics).
@@ -21,5 +27,17 @@ export class MetricsController {
   @Get('retention')
   getRetention(@Query() query: MetricsQueryDto): Promise<RetentionResponse> {
     return this.metricsService.getRetention(query);
+  }
+
+  @Get('revenue')
+  getRevenue(@Query() query: RevenueQueryDto): Promise<RevenueResponse> {
+    return this.metricsService.getRevenue(query);
+  }
+
+  @Get('purchase-conversion')
+  getPurchaseConversion(
+    @Query() query: MetricsQueryDto,
+  ): Promise<ConversionResponse> {
+    return this.metricsService.getPurchaseConversion(query);
   }
 }

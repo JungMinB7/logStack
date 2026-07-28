@@ -18,8 +18,10 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import type { EventInput } from '../scripts/send-events';
 import {
   DETERMINISTIC_EVENTS,
+  EXPECTED_CONVERSION,
   EXPECTED_DAU,
   EXPECTED_RETENTION,
+  EXPECTED_REVENUE,
   FIXTURE_INSTANCE_ID,
   FIXTURE_RANGE,
 } from './fixtures/deterministic-events';
@@ -220,6 +222,150 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  function purchaseEvent(
+    userId: number,
+    occurredAt: string,
+    orderId: string,
+    amountMinor: number,
+  ): EventInput {
+    return {
+      instance_id: FIXTURE_INSTANCE_ID,
+      event_id: randomUUID(),
+      event_type: 'shop_purchase',
+      user_id: userId,
+      character_id: 100 + userId,
+      session_id: `session-extra-u${userId}`,
+      channel_id: 'channel-01',
+      payload: {
+        order_id: orderId,
+        product_id: 'cash-item-x',
+        product_name: 'extra item',
+        quantity: 1,
+        amount_minor: amountMinor,
+        currency: 'KRW',
+      },
+      occurred_at: occurredAt,
+    };
+  }
+
+  it('매출/ARPU: EXPECTED_REVENUE와 일치 (중복 event_id 2회 전송에도 매출 10000)', async () => {
+    const res = await getMetric(
+      `/api/v1/metrics/revenue?start=${start}&end=${end}&currency=KRW`,
+    ).expect(200);
+
+    expect(res.body).toEqual({
+      meta: { start, end, page: 1, page_size: 31, total: 2 },
+      summary: EXPECTED_REVENUE.summary, // revenue "15000", active 3, arpu "5000.00"
+      data: EXPECTED_REVENUE.data, // 1/1: 10000·"5000.00", 1/2: 5000·"1666.67"
+    });
+  });
+
+  it('결제 전환율: EXPECTED_CONVERSION과 일치 (1/1 0.5, summary 0.6667)', async () => {
+    const res = await getMetric(
+      `/api/v1/metrics/purchase-conversion?start=${start}&end=${end}`,
+    ).expect(200);
+
+    expect(res.body).toEqual({
+      meta: { start, end, page: 1, page_size: 31, total: 2 },
+      summary: EXPECTED_CONVERSION.summary, // 기간 고유 유저 재계산 (2/3=0.6667)
+      data: EXPECTED_CONVERSION.data,
+    });
+  });
+
+  it('전일 로그인 + 당일 결제 유저는 당일 분자에서 제외된다 (design.md §12.2-7)', async () => {
+    await ingest([
+      loginEvent(950, '2026-01-04T23:00:00.000Z'), // 전일 로그인
+      purchaseEvent(950, '2026-01-05T01:00:00.000Z', 'ORDER-MIDNIGHT-1', 9900), // 당일 결제 (당일 로그인 없음)
+      loginEvent(951, '2026-01-05T02:00:00.000Z'), // 당일 활성 유저는 별도로 존재
+    ]).expect(200);
+
+    const res = await getMetric(
+      '/api/v1/metrics/purchase-conversion?start=2026-01-04&end=2026-01-05',
+    ).expect(200);
+    const body = res.body as {
+      data: Array<{ conversion_rate: number | null }>;
+      summary: unknown;
+    };
+    expect(body.data).toEqual([
+      // 01-04: 활성 {950}, 결제∩활성 없음
+      { date: '2026-01-04', paying_users: 0, active_users: 1, conversion_rate: 0 },
+      // 01-05: 활성 {951}, 결제 유저 950은 당일 비활성 → 교집합 제외, ≤ 1.0 유지
+      { date: '2026-01-05', paying_users: 0, active_users: 1, conversion_rate: 0 },
+    ]);
+    // 기간 전체 summary에서는 950이 (01-04 로그인 ∩ 기간 내 결제)로 포함된다
+    expect(body.summary).toEqual({
+      paying_users: 1,
+      active_users: 2,
+      conversion_rate: 0.5,
+    });
+  });
+
+  it('amount_minor=0 결제도 결제 유저(PU)에 포함된다 [A-29]', async () => {
+    await ingest([
+      loginEvent(960, '2026-01-06T01:00:00.000Z'),
+      purchaseEvent(960, '2026-01-06T02:00:00.000Z', 'ORDER-FREE-1', 0),
+    ]).expect(200);
+
+    const res = await getMetric(
+      '/api/v1/metrics/purchase-conversion?start=2026-01-06&end=2026-01-06',
+    ).expect(200);
+    expect((res.body as { data: unknown }).data).toEqual([
+      { date: '2026-01-06', paying_users: 1, active_users: 1, conversion_rate: 1 },
+    ]);
+  });
+
+  it('활성 유저 0인 날 → revenue "0"/arpu null, 전환율 null (zero-fill)', async () => {
+    const revenue = await getMetric(
+      '/api/v1/metrics/revenue?start=2026-01-03&end=2026-01-03&currency=KRW',
+    ).expect(200);
+    expect((revenue.body as { data: unknown }).data).toEqual([
+      {
+        date: '2026-01-03',
+        currency: 'KRW',
+        revenue_minor: '0',
+        active_users: 0,
+        arpu_minor: null,
+      },
+    ]);
+    expect((revenue.body as { summary: unknown }).summary).toEqual({
+      currency: 'KRW',
+      revenue_minor: '0',
+      active_users: 0,
+      arpu_minor: null,
+    });
+
+    const conversion = await getMetric(
+      '/api/v1/metrics/purchase-conversion?start=2026-01-03&end=2026-01-03',
+    ).expect(200);
+    expect((conversion.body as { data: unknown }).data).toEqual([
+      {
+        date: '2026-01-03',
+        paying_users: 0,
+        active_users: 0,
+        conversion_rate: null,
+      },
+    ]);
+    expect((conversion.body as { summary: unknown }).summary).toEqual({
+      paying_users: 0,
+      active_users: 0,
+      conversion_rate: null,
+    });
+  });
+
+  it('currency 누락·형식 오류 → 400 INVALID_CURRENCY', async () => {
+    const missing = await getMetric(
+      `/api/v1/metrics/revenue?start=${start}&end=${end}`,
+    ).expect(400);
+    expect(missing.body).toMatchObject({ error: { code: 'INVALID_CURRENCY' } });
+
+    const lowercase = await getMetric(
+      `/api/v1/metrics/revenue?start=${start}&end=${end}&currency=krw`,
+    ).expect(400);
+    expect(lowercase.body).toMatchObject({
+      error: { code: 'INVALID_CURRENCY' },
+    });
   });
 
   it('잘못된 키 401 (적재 키로도 조회 불가)', async () => {

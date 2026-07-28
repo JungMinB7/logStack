@@ -1,11 +1,14 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type { MetricsQueryDto } from './dto/metrics-query.dto';
+import type { RevenueQueryDto } from './dto/revenue-query.dto';
 import { MetricsRepository } from './metrics.repository';
 import type {
+  ConversionResponse,
   DauResponse,
   MetricsMeta,
   RetentionResponse,
   RetentionRow,
+  RevenueResponse,
 } from './metrics.types';
 
 const DAY_MS = 86_400_000;
@@ -90,6 +93,75 @@ export class MetricsService {
     };
   }
 
+  /** §9.3 / §10.4 매출·ARPU (통화별 분리, 일별 data + 기간 summary 병기) */
+  async getRevenue(query: RevenueQueryDto): Promise<RevenueResponse> {
+    const currency = this.parseCurrency(query.currency);
+    const range = this.parseRange(query);
+    const [rows, revenueTotal, activeTotal] = await Promise.all([
+      this.repository.revenueByDay(range.start, range.end, currency),
+      this.repository.revenueTotal(range.start, range.end, currency),
+      this.repository.uniqueLoginUsers(range.start, range.end),
+    ]);
+    const data = rows.map((row) => ({
+      date: toDateString(row.day),
+      currency,
+      revenue_minor: row.revenue_minor.toString(), // BigInt → 문자열 (AI_RULES 15)
+      active_users: row.active_users,
+      arpu_minor: formatArpuMinor(row.revenue_minor, row.active_users),
+    }));
+    return {
+      meta: this.buildMeta(query, range),
+      // §9.3: 기간 ARPU = 기간 전체 매출 ÷ 기간 고유 활성 유저 (일별 합 아님)
+      summary: {
+        currency,
+        revenue_minor: revenueTotal.toString(),
+        active_users: activeTotal,
+        arpu_minor: formatArpuMinor(revenueTotal, activeTotal),
+      },
+      data: this.paginate(data, query),
+    };
+  }
+
+  /** §9.4 / §10.5 결제 전환율 (분자 = 활성 유저 집합과의 교집합) */
+  async getPurchaseConversion(
+    query: MetricsQueryDto,
+  ): Promise<ConversionResponse> {
+    const range = this.parseRange(query);
+    const [rows, totals] = await Promise.all([
+      this.repository.conversionByDay(range.start, range.end),
+      this.repository.conversionTotals(range.start, range.end),
+    ]);
+    const data = rows.map((row) => ({
+      date: toDateString(row.day),
+      paying_users: row.paying_users,
+      active_users: row.active_users,
+      conversion_rate: rate(row.paying_users, row.active_users),
+    }));
+    return {
+      meta: this.buildMeta(query, range),
+      // §9.4: 월(기간) 전환율은 일별 비율의 평균이 아니라 기간 고유 유저로 재계산
+      summary: {
+        paying_users: totals.paying_users,
+        active_users: totals.active_users,
+        conversion_rate: rate(totals.paying_users, totals.active_users),
+      },
+      data: this.paginate(data, query),
+    };
+  }
+
+  /** currency 필수 + ISO 4217 형식 — 오류는 400 INVALID_CURRENCY (§10.4) */
+  private parseCurrency(value: string | undefined): string {
+    if (!value || !/^[A-Z]{3}$/.test(value)) {
+      throw new BadRequestException({
+        error: {
+          code: 'INVALID_CURRENCY',
+          message: 'currency is required and must be an ISO 4217 code (e.g. KRW)',
+        },
+      });
+    }
+    return value;
+  }
+
   /** §10.1 기간 검증 — 실패는 400 + 통일 에러 형식 (AI_RULES 11) */
   private parseRange(query: MetricsQueryDto): ParsedRange {
     const startDay = this.parseCalendarDay(query.start, 'start');
@@ -161,4 +233,30 @@ function toEpochDay(dateString: string): number {
 /** 비율 반올림 규칙: 소수 5자리에서 반올림해 4자리 (design.md §9 공통, AI_RULES 24) */
 function round4(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+/** 비율 = 분자/분모 (소수 4자리), 분모 0이면 null */
+function rate(numerator: number, denominator: number): number | null {
+  if (denominator === 0) return null;
+  return round4(numerator / denominator);
+}
+
+/**
+ * ARPU = 매출 ÷ 활성 유저 — 소수 3자리에서 반올림해 2자리 문자열 (AI_RULES 24).
+ * 부동소수점을 쓰지 않는다: BigInt 정수 연산으로 센트(소수 2자리) 단위를
+ * 반올림한 뒤 문자열로 포맷한다. 활성 유저 0이면 null [A-18].
+ */
+function formatArpuMinor(
+  revenueMinor: bigint,
+  activeUsers: number,
+): string | null {
+  if (activeUsers === 0) return null;
+  const users = BigInt(activeUsers);
+  const numerator = revenueMinor * 100n; // 소수 2자리(센트) 스케일
+  const quotient = numerator / users;
+  const remainder = numerator % users;
+  const cents = quotient + (remainder * 2n >= users ? 1n : 0n); // 반올림(half-up)
+  const intPart = cents / 100n;
+  const fracPart = (cents % 100n).toString().padStart(2, '0');
+  return `${intPart.toString()}.${fracPart}`;
 }
