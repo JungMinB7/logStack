@@ -6,8 +6,8 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
+import { safeEquals } from './safe-equals';
 
 /**
  * 적재 API 인증 가드 (design.md §5.4, AI_RULES 9).
@@ -77,12 +77,4 @@ export class ApiKeyGuard implements CanActivate {
       error: { code: 'UNAUTHORIZED', message: 'missing or invalid API key' },
     });
   }
-}
-
-/** 타이밍 공격을 피하는 문자열 비교 */
-function safeEquals(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
 }

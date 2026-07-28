@@ -117,4 +117,7 @@ docker compose up -d db && npm run test:e2e # E2E (PostgreSQL 필요)
 - [x] 적재 API `POST /api/v1/event-batches` — 인증(401/403), 4MB 제한(413),
       멱등성 트랜잭션(§6.2), 부분 성공 + 카운트 불변식, 내부 데드라인 10초
 - [x] 고정 데이터셋 / 생성기 / 전송 클라이언트 / seed / demo
-- [ ] 지표 API 5종 (`/api/v1/metrics/*`) — 미구현 (demo에서 404 FAIL로 표시)
+- [x] 지표 API: DAU `GET /api/v1/metrics/dau`, 리텐션 `GET /api/v1/metrics/retention`
+      — ADMIN_API_KEY 인증, zero-fill, 반개구간, matured/null 판정
+- [ ] 지표 API: revenue / purchase-conversion / engagement — 미구현
+      (demo에서 404 FAIL로 표시)
