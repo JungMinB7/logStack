@@ -230,6 +230,7 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
     occurredAt: string,
     orderId: string,
     amountMinor: number,
+    currency: string = 'KRW',
   ): EventInput {
     return {
       instance_id: FIXTURE_INSTANCE_ID,
@@ -245,7 +246,7 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
         product_name: 'extra item',
         quantity: 1,
         amount_minor: amountMinor,
-        currency: 'KRW',
+        currency,
       },
       occurred_at: occurredAt,
     };
@@ -475,6 +476,148 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
       `/api/v1/metrics/engagement?start=${start}&end=${end}&event_type=teleport`,
     ).expect(400);
     expect(res.body).toMatchObject({ error: { code: 'UNKNOWN_EVENT_TYPE' } });
+  });
+
+  it('[회귀] 통화 혼합: currency=KRW는 KRW만, USD는 USD만 집계 (AI_RULES 5)', async () => {
+    await ingest([
+      loginEvent(940, '2026-01-10T01:00:00.000Z'),
+      purchaseEvent(940, '2026-01-10T02:00:00.000Z', 'ORDER-MIX-KRW', 100),
+      purchaseEvent(940, '2026-01-10T03:00:00.000Z', 'ORDER-MIX-USD', 7777, 'USD'),
+    ]).expect(200);
+
+    const krw = await getMetric(
+      '/api/v1/metrics/revenue?start=2026-01-10&end=2026-01-10&currency=KRW',
+    ).expect(200);
+    expect((krw.body as { data: unknown }).data).toEqual([
+      {
+        date: '2026-01-10',
+        currency: 'KRW',
+        revenue_minor: '100', // USD 7777이 섞이지 않아야 함
+        active_users: 1,
+        arpu_minor: '100.00',
+      },
+    ]);
+    expect((krw.body as { summary: unknown }).summary).toEqual({
+      currency: 'KRW',
+      revenue_minor: '100',
+      active_users: 1,
+      arpu_minor: '100.00',
+    });
+
+    const usd = await getMetric(
+      '/api/v1/metrics/revenue?start=2026-01-10&end=2026-01-10&currency=USD',
+    ).expect(200);
+    expect((usd.body as { data: unknown }).data).toEqual([
+      {
+        date: '2026-01-10',
+        currency: 'USD',
+        revenue_minor: '7777',
+        active_users: 1,
+        arpu_minor: '7777.00',
+      },
+    ]);
+  });
+
+  it('[회귀] 기간 summary 교집합: 로그인이 기간 밖에만 있는 결제 유저는 분자 제외 (AI_RULES 21)', async () => {
+    await ingest([
+      loginEvent(990, '2026-01-20T01:00:00.000Z'), // 기간 내 활성 유저
+      purchaseEvent(991, '2026-01-20T02:00:00.000Z', 'ORDER-OUT-1', 500), // 기간 내 결제
+      loginEvent(991, '2026-01-25T01:00:00.000Z'), // 991의 로그인은 기간 밖에만 존재
+    ]).expect(200);
+
+    const res = await getMetric(
+      '/api/v1/metrics/purchase-conversion?start=2026-01-19&end=2026-01-20',
+    ).expect(200);
+    const body = res.body as {
+      summary: { paying_users: number; conversion_rate: number | null };
+      data: Array<{ conversion_rate: number | null }>;
+    };
+    // 991은 기간 내 결제자이지만 기간 내 활성 집합 밖 → summary 분자에서 제외
+    expect(body.summary).toEqual({
+      paying_users: 0,
+      active_users: 1,
+      conversion_rate: 0,
+    });
+    for (const row of body.data) {
+      if (row.conversion_rate !== null) {
+        expect(row.conversion_rate).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('[회귀] summary는 페이지네이션과 독립 — page=2에서도 동일 (AI_RULES 23)', async () => {
+    const paths = [
+      `/api/v1/metrics/dau?start=${start}&end=${end}`,
+      `/api/v1/metrics/revenue?start=${start}&end=${end}&currency=KRW`,
+      `/api/v1/metrics/purchase-conversion?start=${start}&end=${end}`,
+    ];
+    for (const path of paths) {
+      const page1 = await getMetric(path).expect(200);
+      const page2 = await getMetric(`${path}&page=2&page_size=1`).expect(200);
+      const body1 = page1.body as {
+        meta: { total: number };
+        summary: unknown;
+        data: unknown[];
+      };
+      const body2 = page2.body as {
+        meta: { total: number };
+        summary: unknown;
+        data: unknown[];
+      };
+      expect(body2.summary).toEqual(body1.summary); // summary 불변
+      expect(body2.meta.total).toBe(body1.meta.total); // total 불변
+      expect(body2.data).toEqual([body1.data[1]]); // 2페이지 = 전체의 2번째 행
+    }
+  });
+
+  it('[회귀] 결제의 자정 경계: 23:59:59.999Z → 당일, 00:00:00.000Z → 익일 귀속', async () => {
+    await ingest([
+      loginEvent(930, '2026-01-10T01:00:00.000Z'),
+      purchaseEvent(930, '2026-01-10T23:59:59.999Z', 'ORDER-MID-1', 100),
+      purchaseEvent(930, '2026-01-11T00:00:00.000Z', 'ORDER-MID-2', 200),
+    ]).expect(200);
+
+    const res = await getMetric(
+      '/api/v1/metrics/revenue?start=2026-01-10&end=2026-01-11&currency=KRW',
+    ).expect(200);
+    expect((res.body as { data: unknown }).data).toEqual([
+      {
+        date: '2026-01-10',
+        currency: 'KRW',
+        revenue_minor: '100', // 23:59:59.999는 반개구간상 당일
+        active_users: 1,
+        arpu_minor: '100.00',
+      },
+      {
+        date: '2026-01-11',
+        currency: 'KRW',
+        revenue_minor: '200', // 00:00:00.000은 익일
+        active_users: 0,
+        arpu_minor: null,
+      },
+    ]);
+  });
+
+  it('[회귀] 고정 데이터셋 전량 재전송 후 5개 지표 응답이 동일하다', async () => {
+    const paths = [
+      `/api/v1/metrics/dau?start=${start}&end=${end}`,
+      `/api/v1/metrics/retention?start=${start}&end=${end}`,
+      `/api/v1/metrics/revenue?start=${start}&end=${end}&currency=KRW`,
+      `/api/v1/metrics/purchase-conversion?start=${start}&end=${end}`,
+      `/api/v1/metrics/engagement?start=${start}&end=${end}`,
+    ];
+    const before: unknown[] = [];
+    for (const path of paths) {
+      before.push((await getMetric(path).expect(200)).body);
+    }
+
+    // 커밋 후 응답 유실을 가정한 전량 재전송 — 전부 duplicate여야 한다
+    await seedFixture();
+
+    for (let i = 0; i < paths.length; i += 1) {
+      const after = (await getMetric(paths[i]).expect(200)).body as unknown;
+      expect(after).toEqual(before[i]); // deep-equal 완전 동일
+    }
   });
 
   it('currency 누락·형식 오류 → 400 INVALID_CURRENCY', async () => {
