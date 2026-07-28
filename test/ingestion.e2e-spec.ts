@@ -341,6 +341,30 @@ describe('Ingestion API (e2e)', () => {
     expect(await prisma.gameEvent.count()).toBe(0);
   });
 
+  it('[실패 회귀] 비JSON Content-Type도 4MB 하드 제한을 우회할 수 없다', async () => {
+    // design.md §2.3은 서버와 프록시 모두 요청 본문에 4MB 하드 제한을
+    // 적용한다고 정의한다. express.json()이 건너뛰는 타입도 같은 제한이어야 한다.
+    const oversized = 'x'.repeat(4_500_000);
+
+    // supertest의 in-process socket은 서버가 본문을 소비하지 않고 조기 응답하면
+    // ECONNRESET이 될 수 있어, 실제 TCP listener에 전송해 응답 코드를 관찰한다.
+    await app.listen(0, '127.0.0.1');
+    const res = await fetch(`${await app.getUrl()}${PATH}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+        'Content-Type': 'text/plain',
+      },
+      body: oversized,
+    });
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({
+      error: { code: 'PAYLOAD_TOO_LARGE', message: expect.any(String) as string },
+    });
+    expect(await prisma.gameEvent.count()).toBe(0);
+  });
+
   it('8. 500건 최대 배치 → 200 전량 저장, 처리 시간이 구조화 로그에 남음 (design.md §6.5)', async () => {
     const logSpy = jest.spyOn(Logger.prototype, 'log');
     try {
