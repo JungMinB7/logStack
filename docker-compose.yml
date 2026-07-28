@@ -23,6 +23,7 @@ services:
     environment:
       DATABASE_URL: postgresql://app:app@db:5432/gamelogs?schema=public
       INGEST_API_KEY: ${INGEST_API_KEY:-dev-ingest-key}
+      INGEST_INSTANCE_ID: ${INGEST_INSTANCE_ID:-0fab3f2e-1894-41cd-b915-f99440a3ff32}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key}
       PORT: 3000
     ports:
