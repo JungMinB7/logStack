@@ -26,5 +26,12 @@ export function validateEnv(
         'set them in the environment or .env (see .env.example)',
     );
   }
+  // 역할 분리: 적재 키로 지표 조회가 가능해지는(또는 그 반대) 설정 오류 차단
+  if (config.INGEST_API_KEY === config.ADMIN_API_KEY) {
+    throw new Error(
+      'INGEST_API_KEY and ADMIN_API_KEY must be different keys — ' +
+        'a shared key would collapse the ingest/admin role separation',
+    );
+  }
   return config;
 }

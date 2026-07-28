@@ -31,4 +31,14 @@ describe('validateEnv (fail-closed)', () => {
       'INGEST_API_KEY',
     );
   });
+
+  it('[Codex 회귀] 적재 키와 관리자 키가 같으면 역할 분리를 위해 부팅을 거부한다', () => {
+    expect(() =>
+      validateEnv({
+        INGEST_API_KEY: 'shared-key',
+        INGEST_INSTANCE_ID: '0fab3f2e-1894-41cd-b915-f99440a3ff32',
+        ADMIN_API_KEY: 'shared-key',
+      }),
+    ).toThrow(/INGEST_API_KEY.*ADMIN_API_KEY|ADMIN_API_KEY.*INGEST_API_KEY/);
+  });
 });

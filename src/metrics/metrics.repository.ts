@@ -2,6 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
+/** 트랜잭션 안팎 어디서든 실행할 수 있도록 쿼리 메서드가 받는 클라이언트 타입 */
+type Db = Prisma.TransactionClient;
+
 /**
  * 지표 집계 SQL 전담 (AI_RULES 13 — SQL은 *.repository.ts에만).
  *
@@ -11,10 +14,68 @@ import { PrismaService } from '../prisma/prisma.service';
  * - 일자 귀속은 (occurred_at AT TIME ZONE 'UTC')::date — occurred_at 기준 (AI_RULES 2)
  * - zero-fill은 generate_series로 달력 일자를 만들어 LEFT JOIN (AI_RULES 23)
  * - COUNT는 ::int 캐스팅으로 BigInt 반환을 차단 (AI_RULES 15)
+ * - data와 summary를 병기하는 지표(dau/revenue/conversion)는 *WithSummary 메서드가
+ *   REPEATABLE READ 트랜잭션으로 묶어 한 응답이 단일 DB 스냅샷을 보게 한다
+ *   (Codex 회귀: 두 쿼리 사이의 동시 커밋으로 data·summary가 어긋나는 문제)
  */
 @Injectable()
 export class MetricsRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  /** 읽기 전용 스냅샷 트랜잭션 — data·summary 쿼리 묶음용 */
+  private snapshot<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
+    return this.prisma.$transaction(fn, {
+      isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+    });
+  }
+
+  /** §10.2 DAU — 일별 data와 기간 summary를 단일 스냅샷에서 읽는다 */
+  async dauWithSummary(
+    start: string,
+    end: string,
+  ): Promise<{
+    rows: Array<{ day: Date; dau: number }>;
+    uniqueUsers: number;
+  }> {
+    return this.snapshot(async (tx) => {
+      const rows = await this.dauByDay(start, end, tx);
+      const uniqueUsers = await this.uniqueLoginUsers(start, end, tx);
+      return { rows, uniqueUsers };
+    });
+  }
+
+  /** §10.4 매출 — 일별 data와 기간 summary(매출·활성 유저)를 단일 스냅샷에서 읽는다 */
+  async revenueWithSummary(
+    start: string,
+    end: string,
+    currency: string,
+  ): Promise<{
+    rows: Array<{ day: Date; revenue_minor: string; active_users: number }>;
+    revenueTotal: string;
+    activeTotal: number;
+  }> {
+    return this.snapshot(async (tx) => {
+      const rows = await this.revenueByDay(start, end, currency, tx);
+      const revenueTotal = await this.revenueTotal(start, end, currency, tx);
+      const activeTotal = await this.uniqueLoginUsers(start, end, tx);
+      return { rows, revenueTotal, activeTotal };
+    });
+  }
+
+  /** §10.5 전환율 — 일별 data와 기간 summary를 단일 스냅샷에서 읽는다 */
+  async conversionWithSummary(
+    start: string,
+    end: string,
+  ): Promise<{
+    rows: Array<{ day: Date; paying_users: number; active_users: number }>;
+    totals: { paying_users: number; active_users: number };
+  }> {
+    return this.snapshot(async (tx) => {
+      const rows = await this.conversionByDay(start, end, tx);
+      const totals = await this.conversionTotals(start, end, tx);
+      return { rows, totals };
+    });
+  }
 
   /**
    * §9.1 DAU — 일자별 session_login 고유 user_id 수.
@@ -23,8 +84,9 @@ export class MetricsRepository {
   async dauByDay(
     start: string,
     end: string,
+    db: Db = this.prisma,
   ): Promise<Array<{ day: Date; dau: number }>> {
-    return this.prisma.$queryRaw<Array<{ day: Date; dau: number }>>(Prisma.sql`
+    return db.$queryRaw<Array<{ day: Date; dau: number }>>(Prisma.sql`
       WITH days AS (
         -- zero-fill 기준이 되는 달력 일자 (start ~ end, 양 끝 포함)
         SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
@@ -50,8 +112,12 @@ export class MetricsRepository {
    * §10.2 summary.unique_users — 기간 전체의 고유 로그인 유저 수.
    * 일별 DISTINCT의 합으로는 복원할 수 없으므로 별도 쿼리로 계산한다.
    */
-  async uniqueLoginUsers(start: string, end: string): Promise<number> {
-    const rows = await this.prisma.$queryRaw<Array<{ unique_users: number }>>(
+  async uniqueLoginUsers(
+    start: string,
+    end: string,
+    db: Db = this.prisma,
+  ): Promise<number> {
+    const rows = await db.$queryRaw<Array<{ unique_users: number }>>(
       Prisma.sql`
         SELECT COUNT(DISTINCT user_id)::int AS unique_users
         FROM game_events
@@ -140,14 +206,17 @@ export class MetricsRepository {
    * §9.3 일별 매출/활성 유저 — 매출 = SUM(amount_minor).
    * amount_minor는 주문 총액이므로 quantity를 다시 곱하지 않는다 [A-28].
    * 통화별 분리 집계(currency 필터) — 통화 간 합산 금지 (AI_RULES 5).
-   * revenue_minor는 ::bigint 캐스팅 → Prisma가 BigInt로 반환 (Service에서 문자열 변환).
+   * revenue_minor는 ::text 캐스팅으로 반환 — SUM(bigint)는 numeric이라 합계가
+   * signed BIGINT 범위를 넘을 수 있으므로 ::bigint로 되캐스팅하지 않는다
+   * (Codex 회귀: 안전 정수 1,025건 합계 오버플로우).
    */
   async revenueByDay(
     start: string,
     end: string,
     currency: string,
-  ): Promise<Array<{ day: Date; revenue_minor: bigint; active_users: number }>> {
-    return this.prisma.$queryRaw(Prisma.sql`
+    db: Db = this.prisma,
+  ): Promise<Array<{ day: Date; revenue_minor: string; active_users: number }>> {
+    return db.$queryRaw(Prisma.sql`
       WITH days AS (
         SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
       ),
@@ -162,9 +231,9 @@ export class MetricsRepository {
         GROUP BY 1
       ),
       daily_revenue AS (
-        -- §9.3: 일별 매출 합계 (반개구간, occurred_at 기준)
+        -- §9.3: 일별 매출 합계 (반개구간, occurred_at 기준). SUM(bigint)→numeric 유지
         SELECT (occurred_at AT TIME ZONE 'UTC')::date AS day,
-               SUM(amount_minor)::bigint AS revenue_minor
+               SUM(amount_minor) AS revenue_minor
         FROM purchases
         WHERE currency = ${currency}
           AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
@@ -172,8 +241,8 @@ export class MetricsRepository {
         GROUP BY 1
       )
       SELECT d.day AS day,
-             COALESCE(r.revenue_minor, 0)::bigint AS revenue_minor,
-             COALESCE(a.active_users, 0)          AS active_users
+             COALESCE(r.revenue_minor, 0)::text AS revenue_minor,
+             COALESCE(a.active_users, 0)        AS active_users
       FROM days d
       LEFT JOIN daily_revenue r ON r.day = d.day
       LEFT JOIN daily_active a  ON a.day = d.day
@@ -181,22 +250,26 @@ export class MetricsRepository {
     `);
   }
 
-  /** §9.3 summary — 기간 전체 매출 합계 (통화 필터, 반개구간) */
+  /**
+   * §9.3 summary — 기간 전체 매출 합계 (통화 필터, 반개구간).
+   * ::text 반환 — BIGINT 합계 오버플로우 방지 (revenueByDay와 동일한 이유)
+   */
   async revenueTotal(
     start: string,
     end: string,
     currency: string,
-  ): Promise<bigint> {
-    const rows = await this.prisma.$queryRaw<
-      Array<{ revenue_minor: bigint }>
+    db: Db = this.prisma,
+  ): Promise<string> {
+    const rows = await db.$queryRaw<
+      Array<{ revenue_minor: string }>
     >(Prisma.sql`
-      SELECT COALESCE(SUM(amount_minor), 0)::bigint AS revenue_minor
+      SELECT COALESCE(SUM(amount_minor), 0)::text AS revenue_minor
       FROM purchases
       WHERE currency = ${currency}
         AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
         AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
     `);
-    return rows[0]?.revenue_minor ?? 0n;
+    return rows[0]?.revenue_minor ?? '0';
   }
 
   /**
@@ -208,8 +281,9 @@ export class MetricsRepository {
   async conversionByDay(
     start: string,
     end: string,
+    db: Db = this.prisma,
   ): Promise<Array<{ day: Date; paying_users: number; active_users: number }>> {
-    return this.prisma.$queryRaw(Prisma.sql`
+    return db.$queryRaw(Prisma.sql`
       WITH days AS (
         SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
       ),
@@ -253,8 +327,9 @@ export class MetricsRepository {
   async conversionTotals(
     start: string,
     end: string,
+    db: Db = this.prisma,
   ): Promise<{ paying_users: number; active_users: number }> {
-    const rows = await this.prisma.$queryRaw<
+    const rows = await db.$queryRaw<
       Array<{ paying_users: number; active_users: number }>
     >(Prisma.sql`
       SELECT

@@ -14,6 +14,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/app.setup';
+import { MetricsRepository } from '../src/metrics/metrics.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
 import type { EventInput } from '../scripts/send-events';
 import {
@@ -33,6 +34,7 @@ const INGEST_KEY = 'test-ingest-key';
 describe('Metrics API — DAU & Retention (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
+  let metricsRepository: MetricsRepository;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -43,6 +45,7 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
     configureApp(app);
     await app.init();
     prisma = app.get(PrismaService);
+    metricsRepository = app.get(MetricsRepository);
   });
 
   afterAll(async () => {
@@ -133,6 +136,112 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
       unique_users: 3,
     });
   });
+
+  it('[Codex 회귀] 동시 적재 중에도 DAU data와 summary는 같은 DB 스냅샷을 사용한다', async () => {
+    // 두 읽기 쿼리 사이에 합법적인 동시 커밋을 결정적으로 끼워 넣는다.
+    // 한 HTTP 응답 안의 data와 summary는 같은 시점의 지표여야 한다.
+    // (Codex 원본에서 조정: 스파이가 인자를 그대로 전달해 트랜잭션 클라이언트가
+    // 보존되도록 했고, 재시도·타이머 없이 promise 게이트만 사용해 flaky하지 않다)
+    let markDailyReadComplete!: () => void;
+    const dailyReadComplete = new Promise<void>((resolve) => {
+      markDailyReadComplete = resolve;
+    });
+    const originalDauByDay = metricsRepository.dauByDay.bind(metricsRepository);
+    const originalUniqueLoginUsers =
+      metricsRepository.uniqueLoginUsers.bind(metricsRepository);
+    const dauSpy = jest
+      .spyOn(metricsRepository, 'dauByDay')
+      .mockImplementationOnce(
+        async (...args: Parameters<MetricsRepository['dauByDay']>) => {
+          const dauRows = await originalDauByDay(...args);
+          markDailyReadComplete();
+          return dauRows;
+        },
+      );
+    const summarySpy = jest
+      .spyOn(metricsRepository, 'uniqueLoginUsers')
+      .mockImplementationOnce(
+        async (...args: Parameters<MetricsRepository['uniqueLoginUsers']>) => {
+          await dailyReadComplete;
+          // 일별 읽기와 summary 읽기 사이에 새 로그인이 커밋된다
+          await ingest([
+            loginEvent(777_001, '2042-01-01T12:00:00.000Z'),
+          ]).expect(200);
+          return originalUniqueLoginUsers(...args);
+        },
+      );
+
+    try {
+      const res = await getMetric(
+        '/api/v1/metrics/dau?start=2042-01-01&end=2042-01-01',
+      ).expect(200);
+      const body = res.body as {
+        summary: { unique_users: number };
+        data: Array<{ date: string; dau: number }>;
+      };
+
+      expect(body.data).toHaveLength(1);
+      expect(body.summary.unique_users).toBe(body.data[0].dau);
+    } finally {
+      dauSpy.mockRestore();
+      summarySpy.mockRestore();
+    }
+  });
+
+  it(
+    '[Codex fix 검증] 스냅샷 트랜잭션 만료는 재시도 가능한 503으로 반환한다',
+    async () => {
+      // 각 SQL은 statement_timeout(5초)보다 짧지만, 합계는 interactive
+      // transaction 기본 timeout(5초)을 넘긴다. DB timeout은 문서 계약대로
+      // 500이 아닌 503 STORAGE_UNAVAILABLE이어야 한다.
+      const originalDauByDay =
+        metricsRepository.dauByDay.bind(metricsRepository);
+      const originalUniqueLoginUsers =
+        metricsRepository.uniqueLoginUsers.bind(metricsRepository);
+      const dauSpy = jest
+        .spyOn(metricsRepository, 'dauByDay')
+        .mockImplementationOnce(
+          async (...args: Parameters<MetricsRepository['dauByDay']>) => {
+            const tx = args[2];
+            if (!tx) throw new Error('snapshot transaction client is missing');
+            await tx.$queryRawUnsafe(
+              'SELECT 1::int AS n FROM pg_sleep(3)',
+            );
+            return originalDauByDay(...args);
+          },
+        );
+      const summarySpy = jest
+        .spyOn(metricsRepository, 'uniqueLoginUsers')
+        .mockImplementationOnce(
+          async (
+            ...args: Parameters<MetricsRepository['uniqueLoginUsers']>
+          ) => {
+            const tx = args[2];
+            if (!tx) throw new Error('snapshot transaction client is missing');
+            await tx.$queryRawUnsafe(
+              'SELECT 1::int AS n FROM pg_sleep(3)',
+            );
+            return originalUniqueLoginUsers(...args);
+          },
+        );
+
+      try {
+        const res = await getMetric(
+          '/api/v1/metrics/dau?start=2026-01-01&end=2026-01-01',
+        ).expect(503);
+        expect(res.body).toEqual({
+          error: {
+            code: 'STORAGE_UNAVAILABLE',
+            message: expect.any(String) as string,
+          },
+        });
+      } finally {
+        dauSpy.mockRestore();
+        summarySpy.mockRestore();
+      }
+    },
+    15_000,
+  );
 
   it('리텐션: EXPECTED_RETENTION과 일치 (1/1 코호트 d1=1.0, d7=1.0, d30=0.5)', async () => {
     const res = await getMetric(
@@ -262,6 +371,42 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
       summary: EXPECTED_REVENUE.summary, // revenue "15000", active 3, arpu "5000.00"
       data: EXPECTED_REVENUE.data, // 1/1: 10000·"5000.00", 1/2: 5000·"1666.67"
     });
+  });
+
+  it('[Codex 회귀] 안전 정수 결제의 기간 합계가 BIGINT를 넘어도 문자열로 응답한다', async () => {
+    // 개별 amount_minor는 A-10의 Number.MAX_SAFE_INTEGER 범위 안이지만,
+    // 1,025건의 합계는 PostgreSQL signed BIGINT 범위를 넘는다.
+    const amountMinor = Number.MAX_SAFE_INTEGER;
+    const events = Array.from({ length: 1_025 }, (_, i) =>
+      purchaseEvent(
+        800_000 + i,
+        '2041-01-01T12:00:00.000Z',
+        `ORDER-BIGINT-SUM-${i}`,
+        amountMinor,
+        'JPY',
+      ),
+    );
+    for (let offset = 0; offset < events.length; offset += 500) {
+      const batch = events.slice(offset, offset + 500);
+      const ingested = await ingest(batch).expect(200);
+      expect(
+        (ingested.body as { stored_count: number }).stored_count,
+      ).toBe(batch.length);
+    }
+
+    const expectedRevenue = (BigInt(amountMinor) * 1_025n).toString();
+    const res = await getMetric(
+      '/api/v1/metrics/revenue?start=2041-01-01&end=2041-01-01&currency=JPY',
+    ).expect(200);
+
+    expect(
+      (res.body as { summary: { revenue_minor: string } }).summary
+        .revenue_minor,
+    ).toBe(expectedRevenue);
+    expect(
+      (res.body as { data: Array<{ revenue_minor: string }> }).data[0]
+        .revenue_minor,
+    ).toBe(expectedRevenue);
   });
 
   it('결제 전환율: EXPECTED_CONVERSION과 일치 (1/1 0.5, summary 0.6667)', async () => {
@@ -649,6 +794,15 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
       '/api/v1/metrics/dau?start=2026-01-02&end=2026-01-01',
     ).expect(400);
     expect(res.body).toMatchObject({ error: { code: 'INVALID_DATE_RANGE' } });
+  });
+
+  it('[Codex 회귀] PostgreSQL에 존재하지 않는 year 0000은 500이 아니라 400', async () => {
+    const res = await getMetric(
+      '/api/v1/metrics/dau?start=0000-01-01&end=0000-01-01',
+    ).expect(400);
+    expect(res.body).toMatchObject({
+      error: { code: 'INVALID_DATE_RANGE' },
+    });
   });
 
   it('367일 조회 → 400 RANGE_TOO_LARGE', async () => {

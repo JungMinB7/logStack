@@ -11,6 +11,7 @@ import { Logger } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
@@ -336,6 +337,80 @@ describe('Ingestion API (e2e)', () => {
     ]);
     const res = await post(oversized).expect(413);
     expect(res.body).toMatchObject({
+      error: { code: 'PAYLOAD_TOO_LARGE', message: expect.any(String) as string },
+    });
+    expect(await prisma.gameEvent.count()).toBe(0);
+  });
+
+  it('[Codex 회귀] 비JSON Content-Type도 4MB 하드 제한을 우회할 수 없다', async () => {
+    // design.md §2.3은 서버와 프록시 모두 요청 본문에 4MB 하드 제한을
+    // 적용한다고 정의한다. express.json()이 건너뛰는 타입도 같은 제한이어야 한다.
+    const oversized = 'x'.repeat(4_500_000);
+
+    // supertest의 in-process socket은 서버가 본문을 소비하지 않고 조기 응답하면
+    // ECONNRESET이 될 수 있어, 실제 TCP listener에 전송해 응답 코드를 관찰한다.
+    await app.listen(0, '127.0.0.1');
+    const res = await fetch(`${await app.getUrl()}${PATH}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${API_KEY}`,
+        'Content-Type': 'text/plain',
+      },
+      body: oversized,
+    });
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({
+      error: { code: 'PAYLOAD_TOO_LARGE', message: expect.any(String) as string },
+    });
+    expect(await prisma.gameEvent.count()).toBe(0);
+  });
+
+  it('[Codex fix 검증] Content-Length 없는 청크형 비JSON 본문도 4MB 제한을 받는다', async () => {
+    // Content-Length 사전 검사에 의존하지 않는 전송에서도 서버 자체의
+    // 4MB 제한이 적용되어야 한다. text/plain은 express.json()이 읽지 않으므로
+    // 이 경로는 실제 HTTP 청크 전송으로 검증한다.
+    const server = app.getHttpServer() as { listening?: boolean };
+    if (!server.listening) {
+      await app.listen(0, '127.0.0.1');
+    }
+    const baseUrl = await app.getUrl();
+
+    const result = await new Promise<{ status: number | undefined; body: string }>(
+      (resolve, reject) => {
+        const req = httpRequest(
+          `${baseUrl}${PATH}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${API_KEY}`,
+              'Content-Type': 'text/plain',
+              'Transfer-Encoding': 'chunked',
+            },
+          },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+              body += chunk;
+            });
+            res.on('end', () => {
+              resolve({ status: res.statusCode, body });
+            });
+          },
+        );
+        req.on('error', reject);
+
+        const chunk = 'x'.repeat(64 * 1024);
+        for (let sent = 0; sent < 4_500_000; sent += chunk.length) {
+          req.write(chunk);
+        }
+        req.end();
+      },
+    );
+
+    expect(result.status).toBe(413);
+    expect(JSON.parse(result.body)).toMatchObject({
       error: { code: 'PAYLOAD_TOO_LARGE', message: expect.any(String) as string },
     });
     expect(await prisma.gameEvent.count()).toBe(0);

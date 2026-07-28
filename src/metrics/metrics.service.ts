@@ -18,6 +18,9 @@ const DAY_MS = 86_400_000;
 /** 양 끝 포함 최대 366개 일자 [A-19] */
 const MAX_RANGE_DAYS = 366;
 const DEFAULT_PAGE_SIZE = 31;
+/** 지원 날짜 범위: 1970-01-01 ~ 9999-12-31 (PostgreSQL date와의 교집합) */
+const MIN_DATE_MS = Date.UTC(1970, 0, 1);
+const MAX_DATE_MS = Date.UTC(9999, 11, 31);
 
 interface ParsedRange {
   start: string;
@@ -38,13 +41,13 @@ interface ParsedRange {
 export class MetricsService {
   constructor(private readonly repository: MetricsRepository) {}
 
-  /** §9.1 / §10.2 DAU */
+  /** §9.1 / §10.2 DAU — data·summary는 단일 스냅샷 (Codex 회귀) */
   async getDau(query: MetricsQueryDto): Promise<DauResponse> {
     const range = this.parseRange(query);
-    const [rows, uniqueUsers] = await Promise.all([
-      this.repository.dauByDay(range.start, range.end),
-      this.repository.uniqueLoginUsers(range.start, range.end),
-    ]);
+    const { rows, uniqueUsers } = await this.repository.dauWithSummary(
+      range.start,
+      range.end,
+    );
     const data = rows.map((row) => ({
       date: toDateString(row.day),
       dau: row.dau,
@@ -96,44 +99,42 @@ export class MetricsService {
     };
   }
 
-  /** §9.3 / §10.4 매출·ARPU (통화별 분리, 일별 data + 기간 summary 병기) */
+  /** §9.3 / §10.4 매출·ARPU (통화별 분리, 일별 data + 기간 summary 병기, 단일 스냅샷) */
   async getRevenue(query: RevenueQueryDto): Promise<RevenueResponse> {
     const currency = this.parseCurrency(query.currency);
     const range = this.parseRange(query);
-    const [rows, revenueTotal, activeTotal] = await Promise.all([
-      this.repository.revenueByDay(range.start, range.end, currency),
-      this.repository.revenueTotal(range.start, range.end, currency),
-      this.repository.uniqueLoginUsers(range.start, range.end),
-    ]);
+    const { rows, revenueTotal, activeTotal } =
+      await this.repository.revenueWithSummary(range.start, range.end, currency);
     const data = rows.map((row) => ({
       date: toDateString(row.day),
       currency,
-      revenue_minor: row.revenue_minor.toString(), // BigInt → 문자열 (AI_RULES 15)
+      // DB가 ::text로 돌려준 십진 문자열을 그대로 전달 (BIGINT 합계 오버플로우 안전)
+      revenue_minor: row.revenue_minor,
       active_users: row.active_users,
-      arpu_minor: formatArpuMinor(row.revenue_minor, row.active_users),
+      arpu_minor: formatArpuMinor(BigInt(row.revenue_minor), row.active_users),
     }));
     return {
       meta: this.buildMeta(query, range),
       // §9.3: 기간 ARPU = 기간 전체 매출 ÷ 기간 고유 활성 유저 (일별 합 아님)
       summary: {
         currency,
-        revenue_minor: revenueTotal.toString(),
+        revenue_minor: revenueTotal,
         active_users: activeTotal,
-        arpu_minor: formatArpuMinor(revenueTotal, activeTotal),
+        arpu_minor: formatArpuMinor(BigInt(revenueTotal), activeTotal),
       },
       data: this.paginate(data, query),
     };
   }
 
-  /** §9.4 / §10.5 결제 전환율 (분자 = 활성 유저 집합과의 교집합) */
+  /** §9.4 / §10.5 결제 전환율 (분자 = 활성 유저 집합과의 교집합, 단일 스냅샷) */
   async getPurchaseConversion(
     query: MetricsQueryDto,
   ): Promise<ConversionResponse> {
     const range = this.parseRange(query);
-    const [rows, totals] = await Promise.all([
-      this.repository.conversionByDay(range.start, range.end),
-      this.repository.conversionTotals(range.start, range.end),
-    ]);
+    const { rows, totals } = await this.repository.conversionWithSummary(
+      range.start,
+      range.end,
+    );
     const data = rows.map((row) => ({
       date: toDateString(row.day),
       paying_users: row.paying_users,
@@ -227,17 +228,23 @@ export class MetricsService {
     return { start: query.start, end: query.end, days, startDay };
   }
 
-  /** 달력에 존재하는 날짜인지 검증 (2026-02-30 등 롤오버 차단) */
+  /**
+   * 달력에 존재하는 날짜인지 검증 (2026-02-30 등 롤오버 차단).
+   * 지원 범위는 1970-01-01 ~ 9999-12-31 — JS Date는 year 0000을 허용하지만
+   * PostgreSQL에는 존재하지 않는 연도라 DB 오류(500)로 새는 것을 차단한다.
+   */
   private parseCalendarDay(value: string, field: 'start' | 'end'): number {
     const parsed = new Date(`${value}T00:00:00.000Z`);
     if (
       Number.isNaN(parsed.getTime()) ||
-      parsed.toISOString().slice(0, 10) !== value
+      parsed.toISOString().slice(0, 10) !== value ||
+      parsed.getTime() < MIN_DATE_MS ||
+      parsed.getTime() > MAX_DATE_MS
     ) {
       throw new BadRequestException({
         error: {
           code: 'INVALID_DATE_RANGE',
-          message: `${field} must be a valid calendar date (YYYY-MM-DD)`,
+          message: `${field} must be a valid calendar date between 1970-01-01 and 9999-12-31`,
         },
       });
     }
