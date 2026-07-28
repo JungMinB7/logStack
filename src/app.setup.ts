@@ -26,6 +26,9 @@ export function configureApp(app: INestApplication): void {
   app.use(bodyParserErrorHandler);
 }
 
+/** 413 응답 전에 버리며 읽어줄 본문의 상한 (한도의 2배) — 초과 시 소켓 절단 */
+const DRAIN_LIMIT_BYTES = MAX_BODY_BYTES * 2;
+
 function contentLengthLimit(
   req: Request,
   res: Response,
@@ -33,11 +36,32 @@ function contentLengthLimit(
 ): void {
   const contentLength = Number(req.headers['content-length']);
   if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
-    res.status(413).json({
-      error: {
-        code: 'PAYLOAD_TOO_LARGE',
-        message: 'request body exceeds 4MB limit',
-      },
+    // 본문 수신이 끝나기 전에 응답을 보내고 소켓을 닫으면, 업로드 중인
+    // 클라이언트가 RST(ECONNRESET)를 받아 413 본문을 읽지 못할 수 있다
+    // (Codex fix 검증). 본문을 버리며 끝까지 읽은 뒤 응답하고,
+    // keep-alive 재사용은 차단한다. 단, 한도의 2배를 넘는 폭주 업로드는
+    // 자원 보호를 위해 소켓을 절단한다.
+    const respond = (): void => {
+      if (res.headersSent) return;
+      res.set('Connection', 'close');
+      res.status(413).json({
+        error: {
+          code: 'PAYLOAD_TOO_LARGE',
+          message: 'request body exceeds 4MB limit',
+        },
+      });
+    };
+    let drained = 0;
+    req.on('data', (chunk: Buffer) => {
+      drained += chunk.length;
+      if (drained > DRAIN_LIMIT_BYTES) {
+        respond();
+        req.destroy();
+      }
+    });
+    req.on('end', respond);
+    req.on('error', () => {
+      // 클라이언트가 중간에 끊은 경우 — 응답 불가, 조용히 종료
     });
     return;
   }

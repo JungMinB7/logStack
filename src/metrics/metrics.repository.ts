@@ -22,10 +22,16 @@ type Db = Prisma.TransactionClient;
 export class MetricsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** 읽기 전용 스냅샷 트랜잭션 — data·summary 쿼리 묶음용 */
+  /**
+   * 읽기 전용 스냅샷 트랜잭션 — data·summary 쿼리 묶음용.
+   * timeout 8초는 design.md §6.4의 8초 체계(적재 트랜잭션과 동일)와 정합.
+   * 만료(P2028) 시 전역 필터가 503 STORAGE_UNAVAILABLE로 매핑한다.
+   */
   private snapshot<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
     return this.prisma.$transaction(fn, {
       isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+      maxWait: 5_000,
+      timeout: 8_000,
     });
   }
 

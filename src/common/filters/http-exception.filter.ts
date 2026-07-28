@@ -37,12 +37,45 @@ const MESSAGE_BY_STATUS: Record<number, string> = {
   [HttpStatus.SERVICE_UNAVAILABLE]: 'temporary storage failure, retry later',
 };
 
+/**
+ * 재시도 가능한 저장소 오류인지 판별 (Prisma 오류 코드 duck-typing —
+ * Prisma 타입을 repository 밖으로 가져오지 않기 위해 코드 문자열만 본다).
+ * - P2028: 트랜잭션 만료(interactive transaction timeout)·커넥션 획득 실패
+ * - P1001/P1002: DB 서버 접속 불가·타임아웃
+ * 이들은 클라이언트가 재시도하면 성공할 수 있으므로 500이 아니라
+ * 503 STORAGE_UNAVAILABLE로 응답한다 (design.md §5.5, §6.4).
+ */
+export function isRetryableStorageError(exception: unknown): boolean {
+  if (typeof exception !== 'object' || exception === null) return false;
+  const candidate = exception as { code?: unknown; errorCode?: unknown };
+  const code =
+    typeof candidate.code === 'string'
+      ? candidate.code
+      : typeof candidate.errorCode === 'string'
+        ? candidate.errorCode
+        : undefined;
+  return code === 'P2028' || code === 'P1001' || code === 'P1002';
+}
+
 @Catch()
 export class HttpErrorFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpErrorFilter.name);
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const response = host.switchToHttp().getResponse<Response>();
+
+    if (isRetryableStorageError(exception)) {
+      this.logger.warn(
+        `retryable storage error: ${exception instanceof Error ? exception.message : String(exception)}`,
+      );
+      response.status(HttpStatus.SERVICE_UNAVAILABLE).json({
+        error: {
+          code: 'STORAGE_UNAVAILABLE',
+          message: 'temporary storage failure, retry later',
+        },
+      });
+      return;
+    }
 
     if (exception instanceof HttpException) {
       const status = exception.getStatus();

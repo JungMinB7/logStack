@@ -191,9 +191,9 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
   it(
     '[Codex fix 검증] 스냅샷 트랜잭션 만료는 재시도 가능한 503으로 반환한다',
     async () => {
-      // 각 SQL은 statement_timeout(5초)보다 짧지만, 합계는 interactive
-      // transaction 기본 timeout(5초)을 넘긴다. DB timeout은 문서 계약대로
-      // 500이 아닌 503 STORAGE_UNAVAILABLE이어야 한다.
+      // 각 SQL은 statement_timeout(5초)보다 짧지만, 합계(4.5초×2 = 9초)는
+      // 스냅샷 트랜잭션 timeout(8초 — design.md §6.4 체계)을 넘긴다.
+      // DB timeout은 문서 계약대로 500이 아닌 503 STORAGE_UNAVAILABLE이어야 한다.
       const originalDauByDay =
         metricsRepository.dauByDay.bind(metricsRepository);
       const originalUniqueLoginUsers =
@@ -205,7 +205,7 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
             const tx = args[2];
             if (!tx) throw new Error('snapshot transaction client is missing');
             await tx.$queryRawUnsafe(
-              'SELECT 1::int AS n FROM pg_sleep(3)',
+              'SELECT 1::int AS n FROM pg_sleep(4.5)',
             );
             return originalDauByDay(...args);
           },
@@ -219,7 +219,7 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
             const tx = args[2];
             if (!tx) throw new Error('snapshot transaction client is missing');
             await tx.$queryRawUnsafe(
-              'SELECT 1::int AS n FROM pg_sleep(3)',
+              'SELECT 1::int AS n FROM pg_sleep(4.5)',
             );
             return originalUniqueLoginUsers(...args);
           },
@@ -240,7 +240,7 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
         summarySpy.mockRestore();
       }
     },
-    15_000,
+    20_000,
   );
 
   it('리텐션: EXPECTED_RETENTION과 일치 (1/1 코호트 d1=1.0, d7=1.0, d30=0.5)', async () => {

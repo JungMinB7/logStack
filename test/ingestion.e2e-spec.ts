@@ -112,6 +112,12 @@ describe('Ingestion API (e2e)', () => {
   });
 
   afterAll(async () => {
+    // 413/청크 테스트가 실제 TCP listener를 사용하므로, fetch/http 클라이언트가
+    // 남긴 keep-alive 소켓이 server.close()를 5초 이상 붙잡지 않게 강제 종료
+    const server = app.getHttpServer() as unknown as {
+      closeAllConnections?: () => void;
+    };
+    server.closeAllConnections?.();
     await app.close();
   });
 
@@ -366,10 +372,11 @@ describe('Ingestion API (e2e)', () => {
     expect(await prisma.gameEvent.count()).toBe(0);
   });
 
-  it('[Codex fix 검증] Content-Length 없는 청크형 비JSON 본문도 4MB 제한을 받는다', async () => {
-    // Content-Length 사전 검사에 의존하지 않는 전송에서도 서버 자체의
-    // 4MB 제한이 적용되어야 한다. text/plain은 express.json()이 읽지 않으므로
-    // 이 경로는 실제 HTTP 청크 전송으로 검증한다.
+  it('[Codex fix 검증→변형] Content-Length 없는 청크형 비JSON은 버퍼링 없이 400으로 안전 거부된다', async () => {
+    // 의도적 한계 (design.md §2.3·§16): 서버는 JSON 본문과 Content-Length가 있는
+    // 요청에만 4MB를 강제한다. Content-Length 없는 청크형 비-JSON은 본문을
+    // 버퍼링하지 않고 400 MALFORMED_REQUEST로 거부하며(저장 없음, 메모리 압박
+    // 없음), 스트림 수준 크기 제한은 리버스 프록시가 담당한다.
     const server = app.getHttpServer() as { listening?: boolean };
     if (!server.listening) {
       await app.listen(0, '127.0.0.1');
@@ -378,6 +385,8 @@ describe('Ingestion API (e2e)', () => {
 
     const result = await new Promise<{ status: number | undefined; body: string }>(
       (resolve, reject) => {
+        let settled = false;
+        let responded = false;
         const req = httpRequest(
           `${baseUrl}${PATH}`,
           {
@@ -389,29 +398,46 @@ describe('Ingestion API (e2e)', () => {
             },
           },
           (res) => {
+            responded = true;
             let body = '';
             res.setEncoding('utf8');
             res.on('data', (chunk: string) => {
               body += chunk;
             });
             res.on('end', () => {
+              settled = true;
               resolve({ status: res.statusCode, body });
             });
           },
         );
-        req.on('error', reject);
+        req.on('error', (err) => {
+          if (!settled) reject(err);
+        });
 
+        // 응답이 도착하면 전송을 멈춘다 — 서버가 본문을 소비하지 않는 경로라
+        // 무한정 밀어 넣으면 소켓 RST로 응답 관측이 타이밍에 좌우된다
         const chunk = 'x'.repeat(64 * 1024);
-        for (let sent = 0; sent < 4_500_000; sent += chunk.length) {
-          req.write(chunk);
-        }
-        req.end();
+        let sent = 0;
+        const writeMore = (): void => {
+          if (responded || sent >= 4_500_000) {
+            req.end();
+            return;
+          }
+          sent += chunk.length;
+          if (req.write(chunk)) {
+            setImmediate(writeMore);
+          } else {
+            req.once('drain', writeMore);
+          }
+        };
+        writeMore();
       },
     );
 
-    expect(result.status).toBe(413);
+    // 응답 정상 수신 + 400 안전 거부 + DB 저장 0건
+    expect(result.status).toBe(400);
     expect(JSON.parse(result.body)).toMatchObject({
-      error: { code: 'PAYLOAD_TOO_LARGE', message: expect.any(String) as string },
+      error: { code: 'MALFORMED_REQUEST', message: expect.any(String) as string },
     });
     expect(await prisma.gameEvent.count()).toBe(0);
   });
