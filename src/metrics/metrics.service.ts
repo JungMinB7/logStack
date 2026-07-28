@@ -1,10 +1,13 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { EVENT_TYPES } from '../ingestion/dto/event-envelope.dto';
+import type { EngagementQueryDto } from './dto/engagement-query.dto';
 import type { MetricsQueryDto } from './dto/metrics-query.dto';
 import type { RevenueQueryDto } from './dto/revenue-query.dto';
 import { MetricsRepository } from './metrics.repository';
 import type {
   ConversionResponse,
   DauResponse,
+  EngagementResponse,
   MetricsMeta,
   RetentionResponse,
   RetentionRow,
@@ -149,6 +152,44 @@ export class MetricsService {
     };
   }
 
+  /** §9.5 / §10.6 [제안 지표] 활동별 참여율 — 일별 grain만 (summary 없음) */
+  async getEngagement(query: EngagementQueryDto): Promise<EngagementResponse> {
+    const eventTypes = this.parseEventTypes(query.event_type);
+    const range = this.parseRange(query);
+    const rows = await this.repository.engagementByDayType(
+      range.start,
+      range.end,
+      eventTypes,
+    );
+    const data = rows.map((row) => ({
+      date: toDateString(row.day),
+      event_type: row.event_type,
+      engaged_users: row.engaged_users,
+      dau: row.dau,
+      engagement_rate: rate(row.engaged_users, row.dau), // DAU 0이면 null
+    }));
+    return {
+      // total = 달력 일수 × 타입 수 — 생략 시 최대 366×13으로 페이지네이션이
+      // 실질 필요한 유일한 endpoint (§10.6)
+      meta: this.buildMeta(query, range, range.days * eventTypes.length),
+      data: this.paginate(data, query),
+    };
+  }
+
+  /** event_type 허용 목록 검증 — 목록 밖 값은 400 UNKNOWN_EVENT_TYPE (§10.6) */
+  private parseEventTypes(value: string | undefined): string[] {
+    if (value === undefined) return [...EVENT_TYPES]; // 생략 시 13개 타입 전체
+    if (!(EVENT_TYPES as readonly string[]).includes(value)) {
+      throw new BadRequestException({
+        error: {
+          code: 'UNKNOWN_EVENT_TYPE',
+          message: 'event_type must be one of the 13 defined event types',
+        },
+      });
+    }
+    return [value];
+  }
+
   /** currency 필수 + ISO 4217 형식 — 오류는 400 INVALID_CURRENCY (§10.4) */
   private parseCurrency(value: string | undefined): string {
     if (!value || !/^[A-Z]{3}$/.test(value)) {
@@ -203,13 +244,17 @@ export class MetricsService {
     return Math.floor(parsed.getTime() / DAY_MS);
   }
 
-  private buildMeta(query: MetricsQueryDto, range: ParsedRange): MetricsMeta {
+  private buildMeta(
+    query: MetricsQueryDto,
+    range: ParsedRange,
+    total: number = range.days, // 기본: zero-fill 기준 전체 행 수 = 달력 일수
+  ): MetricsMeta {
     return {
       start: range.start,
       end: range.end,
       page: query.page ?? 1,
       page_size: query.page_size ?? DEFAULT_PAGE_SIZE,
-      total: range.days, // zero-fill 기준 전체 행 수 = 달력 일수
+      total,
     };
   }
 

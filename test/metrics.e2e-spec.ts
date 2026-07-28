@@ -20,6 +20,7 @@ import {
   DETERMINISTIC_EVENTS,
   EXPECTED_CONVERSION,
   EXPECTED_DAU,
+  EXPECTED_ENGAGEMENT_BOSS_CLEAR,
   EXPECTED_RETENTION,
   EXPECTED_REVENUE,
   FIXTURE_INSTANCE_ID,
@@ -352,6 +353,128 @@ describe('Metrics API — DAU & Retention (e2e)', () => {
       active_users: 0,
       conversion_rate: null,
     });
+  });
+
+  function activityEvent(
+    userId: number,
+    eventType: string,
+    occurredAt: string,
+    payload: Record<string, unknown> = {},
+  ): EventInput {
+    return {
+      instance_id: FIXTURE_INSTANCE_ID,
+      event_id: randomUUID(),
+      event_type: eventType,
+      user_id: userId,
+      character_id: 100 + userId,
+      session_id: `session-extra-u${userId}`,
+      channel_id: 'channel-01',
+      payload,
+      occurred_at: occurredAt,
+    };
+  }
+
+  it('참여율: 1/1 boss_clear = 0.5 (유저1만 참여, DAU 2)', async () => {
+    const res = await getMetric(
+      '/api/v1/metrics/engagement?start=2026-01-01&end=2026-01-01&event_type=boss_clear',
+    ).expect(200);
+
+    expect(res.body).toEqual({
+      meta: {
+        start: '2026-01-01',
+        end: '2026-01-01',
+        page: 1,
+        page_size: 31,
+        total: 1,
+      },
+      data: EXPECTED_ENGAGEMENT_BOSS_CLEAR.data,
+    });
+  });
+
+  it('전일 로그인 유저의 당일 boss_clear는 당일 분자에서 제외된다 (교집합, ≤ 1.0)', async () => {
+    await ingest([
+      loginEvent(970, '2026-01-04T23:00:00.000Z'), // 전일 로그인
+      activityEvent(970, 'boss_clear', '2026-01-05T01:00:00.000Z', {
+        boss_id: 'boss-02',
+      }), // 당일 활동 (당일 로그인 없음)
+      loginEvent(971, '2026-01-05T02:00:00.000Z'), // 당일 DAU 구성원
+    ]).expect(200);
+
+    const res = await getMetric(
+      '/api/v1/metrics/engagement?start=2026-01-05&end=2026-01-05&event_type=boss_clear',
+    ).expect(200);
+    // 유저970은 당일 DAU 집합 밖 → 분자 제외. 0 ≤ rate ≤ 1 유지
+    expect((res.body as { data: unknown }).data).toEqual([
+      {
+        date: '2026-01-05',
+        event_type: 'boss_clear',
+        engaged_users: 0,
+        dau: 1,
+        engagement_rate: 0,
+      },
+    ]);
+  });
+
+  it('event_type 생략 시 (달력 일수 × 13) 행 + 페이지네이션·정렬 동작', async () => {
+    // 2일 × 13타입 = 26행, 기본 page_size 31이면 한 페이지에 전부
+    const res = await getMetric(
+      `/api/v1/metrics/engagement?start=${start}&end=${end}`,
+    ).expect(200);
+    const body = res.body as {
+      meta: { total: number };
+      data: Array<{
+        date: string;
+        event_type: string;
+        engaged_users: number;
+        dau: number;
+        engagement_rate: number | null;
+      }>;
+    };
+    expect(body.meta.total).toBe(26);
+    expect(body.data).toHaveLength(26);
+    // 정렬: date ASC, event_type ASC
+    const sorted = [...body.data].sort((a, b) =>
+      a.date === b.date
+        ? a.event_type.localeCompare(b.event_type)
+        : a.date.localeCompare(b.date),
+    );
+    expect(body.data).toEqual(sorted);
+    // 고정 데이터셋 spot check: 01-01 boss_clear 0.5, session_login 1.0
+    expect(
+      body.data.find(
+        (r) => r.date === '2026-01-01' && r.event_type === 'boss_clear',
+      ),
+    ).toEqual({
+      date: '2026-01-01',
+      event_type: 'boss_clear',
+      engaged_users: 1,
+      dau: 2,
+      engagement_rate: 0.5,
+    });
+    expect(
+      body.data.find(
+        (r) => r.date === '2026-01-01' && r.event_type === 'session_login',
+      ),
+    ).toMatchObject({ engaged_users: 2, dau: 2, engagement_rate: 1 });
+
+    // 페이지네이션: page_size=10, page=3 → 21~26번째 행 (6개), total 유지
+    const page3 = await getMetric(
+      `/api/v1/metrics/engagement?start=${start}&end=${end}&page=3&page_size=10`,
+    ).expect(200);
+    const page3Body = page3.body as {
+      meta: { total: number; page: number; page_size: number };
+      data: unknown[];
+    };
+    expect(page3Body.meta).toMatchObject({ total: 26, page: 3, page_size: 10 });
+    expect(page3Body.data).toHaveLength(6);
+    expect(page3Body.data).toEqual(body.data.slice(20));
+  });
+
+  it('목록 밖 event_type → 400 UNKNOWN_EVENT_TYPE', async () => {
+    const res = await getMetric(
+      `/api/v1/metrics/engagement?start=${start}&end=${end}&event_type=teleport`,
+    ).expect(400);
+    expect(res.body).toMatchObject({ error: { code: 'UNKNOWN_EVENT_TYPE' } });
   });
 
   it('currency 누락·형식 오류 → 400 INVALID_CURRENCY', async () => {

@@ -1,11 +1,13 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { AdminApiKeyGuard } from '../auth/admin-api-key.guard';
+import { EngagementQueryDto } from './dto/engagement-query.dto';
 import { MetricsQueryDto } from './dto/metrics-query.dto';
 import { RevenueQueryDto } from './dto/revenue-query.dto';
 import { MetricsService } from './metrics.service';
 import type {
   ConversionResponse,
   DauResponse,
+  EngagementResponse,
   RetentionResponse,
   RevenueResponse,
 } from './metrics.types';
@@ -39,5 +41,10 @@ export class MetricsController {
     @Query() query: MetricsQueryDto,
   ): Promise<ConversionResponse> {
     return this.metricsService.getPurchaseConversion(query);
+  }
+
+  @Get('engagement')
+  getEngagement(@Query() query: EngagementQueryDto): Promise<EngagementResponse> {
+    return this.metricsService.getEngagement(query);
   }
 }

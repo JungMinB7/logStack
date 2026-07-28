@@ -72,3 +72,19 @@ export interface ConversionResponse {
   };
   data: ConversionRow[];
 }
+
+export interface EngagementRow {
+  date: string;
+  event_type: string;
+  /** |해당 일자 event_type 발생 유저 ∩ 해당 일자 DAU 집합| (§9.5) */
+  engaged_users: number;
+  dau: number;
+  /** 소수 4자리. DAU 0이면 null */
+  engagement_rate: number | null;
+}
+
+/** §9.5 정의가 일 단위이므로 summary 없음 (일별 grain만 — §10.6) */
+export interface EngagementResponse {
+  meta: MetricsMeta;
+  data: EngagementRow[];
+}

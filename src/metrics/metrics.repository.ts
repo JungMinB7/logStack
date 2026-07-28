@@ -279,4 +279,65 @@ export class MetricsRepository {
     `);
     return rows[0] ?? { paying_users: 0, active_users: 0 };
   }
+
+  /**
+   * §9.5 활동별 참여율 재료 — (일 × event_type) zero-fill 격자.
+   * 분자는 단순 발생 유저 수가 아니라 |발생 유저 ∩ 같은 일자 DAU 집합|:
+   * daily_active(로그인 유저) 기준 INNER JOIN이므로 로그인 없는 유저의 활동은
+   * 분자에서 제외되어 0~1 범위가 구조적으로 보장된다 (§9.4와 동일한 자정 케이스 대응).
+   * 발생 건수가 아닌 고유 유저 기준 — 헤비 유저 반복 행동에 왜곡되지 않음 (§9.5).
+   */
+  async engagementByDayType(
+    start: string,
+    end: string,
+    eventTypes: string[],
+  ): Promise<
+    Array<{ day: Date; event_type: string; engaged_users: number; dau: number }>
+  > {
+    return this.prisma.$queryRaw(Prisma.sql`
+      WITH days AS (
+        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+      ),
+      types AS (
+        -- zero-fill의 두 번째 축: 요청된 event_type 목록 (생략 시 13개 전체)
+        SELECT unnest(ARRAY[${Prisma.join(eventTypes)}])::varchar AS event_type
+      ),
+      daily_active AS (
+        -- §9.1: 해당 일자 DAU 집합 (분모이자 교집합의 기준 집합)
+        SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day, user_id
+        FROM game_events
+        WHERE event_type = 'session_login'
+          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+      ),
+      daily_dau AS (
+        SELECT day, COUNT(*)::int AS dau FROM daily_active GROUP BY day
+      ),
+      engaged AS (
+        -- 해당 일자에 event_type을 1회 이상 발생시킨 고유 유저
+        SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day,
+               event_type, user_id
+        FROM game_events
+        WHERE event_type IN (${Prisma.join(eventTypes)})
+          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+      ),
+      counts AS (
+        -- 분자 = 발생 유저 ∩ DAU 집합 (INNER JOIN = 교집합)
+        SELECT e.day, e.event_type, COUNT(*)::int AS engaged_users
+        FROM engaged e
+        JOIN daily_active a ON a.day = e.day AND a.user_id = e.user_id
+        GROUP BY e.day, e.event_type
+      )
+      SELECT d.day AS day,
+             t.event_type,
+             COALESCE(c.engaged_users, 0) AS engaged_users,
+             COALESCE(u.dau, 0)           AS dau
+      FROM days d
+      CROSS JOIN types t
+      LEFT JOIN counts c ON c.day = d.day AND c.event_type = t.event_type
+      LEFT JOIN daily_dau u ON u.day = d.day
+      ORDER BY d.day ASC, t.event_type ASC
+    `);
+  }
 }
