@@ -9,13 +9,14 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main.js",
-    "lint": "eslint \"{src,test}/**/*.ts\"",
+    "lint": "eslint \"{src,test,scripts,prisma}/**/*.ts\"",
     "test": "jest",
     "test:e2e": "jest --config ./test/jest-e2e.json --runInBand",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
-    "seed": "node -e \"console.log('seed: placeholder — 샘플 데이터 생성기는 이후 작업에서 구현')\""
+    "seed": "ts-node prisma/seed.ts",
+    "demo": "ts-node scripts/run-demo.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
