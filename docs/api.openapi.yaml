@@ -1,0 +1,536 @@
+# docs/api.openapi.yaml — v2
+# design.md v2 §5(적재), §10(집계)의 계약을 기계가 읽을 수 있는 형태로 옮긴 것.
+# 이 파일이 API 계약의 단일 기준이며, 컨트롤러·README 예시·테스트와 항상 일치해야 한다.
+# v2 변경: 422 제거(항상 200 + per-event 결과), order_duplicate_count 추가,
+#          summary 객체 추가(dau/revenue/purchase-conversion), zero-fill·정렬 계약 명시,
+#          matured 판정·가변 결과 설명 갱신
+
+openapi: 3.0.3
+info:
+  title: RPG 게임 로그 적재 & 집계 API
+  version: 2.0.0
+  description: |
+    제약이 있는 HTTP 전송 환경(120회/분, 요청 4MB, timeout 30초)에서
+    게임 이벤트를 유실 없이 적재하고, 운영 지표를 조회하는 API.
+    - 멱등성: 같은 event_id 재전송 시 중복 저장되지 않음 (duplicate로 집계)
+    - 시각: 모든 시각은 UTC ISO8601(ms). 지표는 occurred_at 기준.
+      모든 기간은 반개구간 [start 00:00, end+1일 00:00)
+    - 모든 지표는 조회 시점 적재 데이터 기준의 가변 결과 (늦은 이벤트로 변경 가능)
+
+servers:
+  - url: http://localhost:3000
+    description: 로컬 개발 환경 (실배포에서는 HTTPS 443, TLS는 프록시 종료)
+
+tags:
+  - name: ingestion
+    description: 전송측(게임 인스턴스)이 호출하는 적재 API
+  - name: metrics
+    description: 운영자/분석가가 호출하는 집계 조회 API
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/event-batches:
+    post:
+      tags: [ingestion]
+      operationId: ingestEventBatch
+      summary: 이벤트 배치 적재
+      description: |
+        한 요청 = 한 배치(1~500건, 최대 4MB). 배치 구조가 유효하면 모든 이벤트가
+        검증 실패하더라도 200 + per-event 결과로 응답한다(부분 실패 정책).
+        응답은 DB 커밋 이후에만 반환된다 (성공 응답 = 저장 완료).
+        카운트 불변식: received = accepted + rejected, accepted = stored + duplicate,
+        order_duplicate ⊆ stored.
+        전송측은 HTTP 상태가 아니라 응답 본문을 파싱해 stored/duplicate/order_duplicate로
+        확인된 이벤트만 outbox에서 삭제해야 한다 (design.md §4.2).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventBatchRequest'
+      responses:
+        '200':
+          description: 적재 완료 (부분 실패 포함 — rejected 배열 확인)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventBatchResponse'
+        '400': { $ref: '#/components/responses/MalformedRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/InstanceMismatch' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
+
+  /api/v1/metrics/dau:
+    get:
+      tags: [metrics]
+      operationId: getDau
+      summary: 일자별 DAU
+      description: |
+        일자별로 session_login을 1회 이상 발생시킨 고유 user_id 수.
+        요청 기간의 모든 달력 일자를 zero-fill로 반환(이벤트 없는 날 dau=0), date ASC 정렬.
+        summary.unique_users는 기간 전체의 고유 로그인 유저 수(일별 합이 아님)이며
+        페이지네이션과 무관하게 항상 요청 기간 전체로 계산된다.
+      parameters:
+        - $ref: '#/components/parameters/Start'
+        - $ref: '#/components/parameters/End'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, summary, data]
+                properties:
+                  meta: { $ref: '#/components/schemas/Meta' }
+                  summary:
+                    type: object
+                    required: [unique_users]
+                    properties:
+                      unique_users:
+                        type: integer
+                        description: 기간 전체 고유 로그인 유저 수
+                        example: 3
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [date, dau]
+                      properties:
+                        date: { type: string, format: date, example: '2026-01-01' }
+                        dau: { type: integer, example: 2 }
+        '400': { $ref: '#/components/responses/InvalidParams' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/metrics/retention:
+    get:
+      tags: [metrics]
+      operationId: getRetention
+      summary: 코호트별 리텐션 (D1/D7/D30)
+      description: |
+        start/end는 코호트 일자(유저 최초 로그인일)를 필터한다.
+        최초 로그인은 조회 범위와 무관하게 전체 이력에서 산출하며,
+        Dn 재접속 판정은 end 이후의 데이터도 사용한다.
+        exact-day 기준: 코호트 일자 + 정확히 N일에 로그인한 비율.
+        matured는 "현재 UTC 일자 > 코호트 일자 + n일"(관찰 일자가 완전히 끝난 후)일 때만
+        true이며, true여도 늦게 도착한 이벤트로 값이 바뀔 수 있다(최종 확정 아님).
+        미성숙 dN은 null. 신규 유저 없는 코호트 일자는 new_users=0으로 zero-fill.
+      parameters:
+        - $ref: '#/components/parameters/Start'
+        - $ref: '#/components/parameters/End'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, data]
+                properties:
+                  meta: { $ref: '#/components/schemas/Meta' }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [cohort_date, new_users, d1, d7, d30, matured]
+                      properties:
+                        cohort_date: { type: string, format: date }
+                        new_users: { type: integer, example: 100 }
+                        d1: { type: number, nullable: true, example: 0.42 }
+                        d7: { type: number, nullable: true, example: 0.18 }
+                        d30: { type: number, nullable: true, example: null }
+                        matured:
+                          type: object
+                          required: [d1, d7, d30]
+                          properties:
+                            d1: { type: boolean }
+                            d7: { type: boolean }
+                            d30: { type: boolean, example: false }
+        '400': { $ref: '#/components/responses/InvalidParams' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/metrics/revenue:
+    get:
+      tags: [metrics]
+      operationId: getRevenue
+      summary: 일자별 매출 및 ARPU (+ 기간 전체 summary)
+      description: |
+        통화 간 합산 방지를 위해 currency 필수. 금액은 BIGINT 정밀도 보존을 위해 문자열.
+        amount_minor는 주문 총액(수량 반영)이므로 SUM으로 매출을 계산한다.
+        ARPU = 매출 ÷ 활성 유저(session_login 고유 유저, ARPPU 아님). 분모 0이면 null.
+        summary는 요청 기간 전체 기준: active_users는 기간 고유 유저(일별 합 아님)이고
+        기간 ARPU는 summary에서만 올바르게 제공된다. 페이지네이션과 무관.
+        일별 data는 zero-fill(매출 없는 날 revenue_minor="0"), date ASC.
+        arpu_minor는 소수 3자리에서 반올림해 2자리 문자열.
+      parameters:
+        - $ref: '#/components/parameters/Start'
+        - $ref: '#/components/parameters/End'
+        - name: currency
+          in: query
+          required: true
+          description: ISO 4217 통화 코드 (예. KRW). 형식 오류는 400 INVALID_CURRENCY
+          schema: { type: string, pattern: '^[A-Z]{3}$', example: KRW }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, summary, data]
+                properties:
+                  meta: { $ref: '#/components/schemas/Meta' }
+                  summary:
+                    type: object
+                    required: [currency, revenue_minor, active_users, arpu_minor]
+                    properties:
+                      currency: { type: string, example: KRW }
+                      revenue_minor: { type: string, example: '15000' }
+                      active_users:
+                        type: integer
+                        description: 기간 전체 고유 활성 유저
+                        example: 3
+                      arpu_minor: { type: string, nullable: true, example: '5000.00' }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [date, currency, revenue_minor, active_users, arpu_minor]
+                      properties:
+                        date: { type: string, format: date }
+                        currency: { type: string, example: KRW }
+                        revenue_minor: { type: string, example: '10000' }
+                        active_users: { type: integer, example: 2 }
+                        arpu_minor: { type: string, nullable: true, example: '5000.00' }
+        '400': { $ref: '#/components/responses/InvalidParams' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/metrics/purchase-conversion:
+    get:
+      tags: [metrics]
+      operationId: getPurchaseConversion
+      summary: 일자별 결제 전환율 (+ 기간 전체 summary)
+      description: |
+        전환율 = |결제 유저 ∩ 활성 유저| ÷ |활성 유저| (분자는 분모 집합과의 교집합 —
+        자정을 걸친 세션에서도 0~1 범위가 구조적으로 보장됨).
+        amount_minor=0인 결제도 결제 유저에 포함.
+        summary는 요청 기간 전체의 고유 유저 기준(일별 비율의 평균이 아님), 페이지네이션 무관.
+        zero-fill, date ASC. 비율은 소수 5자리에서 반올림해 4자리. 분모 0이면 null.
+      parameters:
+        - $ref: '#/components/parameters/Start'
+        - $ref: '#/components/parameters/End'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, summary, data]
+                properties:
+                  meta: { $ref: '#/components/schemas/Meta' }
+                  summary:
+                    type: object
+                    required: [paying_users, active_users, conversion_rate]
+                    properties:
+                      paying_users: { type: integer, example: 2 }
+                      active_users: { type: integer, example: 3 }
+                      conversion_rate:
+                        type: number
+                        nullable: true
+                        example: 0.6667
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [date, paying_users, active_users, conversion_rate]
+                      properties:
+                        date: { type: string, format: date }
+                        paying_users: { type: integer, example: 1 }
+                        active_users: { type: integer, example: 2 }
+                        conversion_rate: { type: number, nullable: true, example: 0.5 }
+        '400': { $ref: '#/components/responses/InvalidParams' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/metrics/engagement:
+    get:
+      tags: [metrics]
+      operationId: getEngagement
+      summary: '[제안 지표] 일자별 활동별 참여율'
+      description: |
+        참여율 = |해당 일자에 event_type을 발생시킨 유저 ∩ 해당 일자 DAU 집합| ÷ |DAU 집합|.
+        분자가 DAU 집합과의 교집합이므로 0~1 범위가 구조적으로 보장된다.
+        발생 건수가 아닌 고유 유저 기준이라 헤비 유저의 반복 행동에 왜곡되지 않는다.
+        event_type 생략 시 전체 13개 타입의 (일 × 타입) 조합 반환 — 최대 4,758행으로
+        페이지네이션이 실질 필요한 유일한 endpoint. 정렬: date ASC, event_type ASC.
+        일별 grain만 제공(정의가 일 단위이므로 summary 없음). zero-fill, DAU 0이면 null.
+      parameters:
+        - $ref: '#/components/parameters/Start'
+        - $ref: '#/components/parameters/End'
+        - name: event_type
+          in: query
+          required: false
+          description: 특정 이벤트 타입만 조회. 목록 밖 값은 400 UNKNOWN_EVENT_TYPE
+          schema:
+            $ref: '#/components/schemas/EventType'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, data]
+                properties:
+                  meta: { $ref: '#/components/schemas/Meta' }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [date, event_type, engaged_users, dau, engagement_rate]
+                      properties:
+                        date: { type: string, format: date }
+                        event_type: { $ref: '#/components/schemas/EventType' }
+                        engaged_users: { type: integer, example: 210 }
+                        dau: { type: integer, example: 300 }
+                        engagement_rate:
+                          type: number
+                          nullable: true
+                          example: 0.7
+        '400': { $ref: '#/components/responses/InvalidParams' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 적재는 인스턴스별 API 키, 조회는 관리자 키
+
+  parameters:
+    Start:
+      name: start
+      in: query
+      required: true
+      description: 조회 시작일 (UTC, 포함)
+      schema: { type: string, format: date, example: '2026-01-01' }
+    End:
+      name: end
+      in: query
+      required: true
+      description: 조회 종료일 (UTC, 포함). start ≤ end, 양 끝 포함 최대 366일
+      schema: { type: string, format: date, example: '2026-01-31' }
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 범위 밖 page는 200 + 빈 data
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 100, default: 31 }
+
+  schemas:
+    EventType:
+      type: string
+      enum:
+        - session_login
+        - session_logout
+        - level_up
+        - exp_gain
+        - monster_kill
+        - quest_complete
+        - item_acquire
+        - item_use
+        - currency_change
+        - shop_purchase
+        - boss_clear
+        - map_enter
+        - death
+
+    EventEnvelope:
+      type: object
+      required:
+        - instance_id
+        - event_id
+        - event_type
+        - user_id
+        - character_id
+        - session_id
+        - channel_id
+        - payload
+        - occurred_at
+      properties:
+        instance_id: { type: string, format: uuid }
+        event_id:
+          type: string
+          format: uuid
+          description: 멱등성 키. 같은 값 재전송 시 중복 저장되지 않음
+        event_type: { $ref: '#/components/schemas/EventType' }
+        user_id: { type: integer, format: int64, example: 1001 }
+        character_id: { type: integer, format: int64, example: 2001 }
+        session_id: { type: string, maxLength: 64 }
+        channel_id: { type: string, maxLength: 64 }
+        payload:
+          type: object
+          description: |
+            타입별 상세. shop_purchase만 필드 단위 엄격 검증(ShopPurchasePayload),
+            그 외 타입은 object 여부만 확인 후 원본 보존 (design.md §8.1)
+        occurred_at:
+          type: string
+          format: date-time
+          description: ISO8601 UTC, ms 정밀도
+          example: '2026-07-27T04:15:22.123Z'
+
+    ShopPurchasePayload:
+      type: object
+      required: [order_id, product_id, product_name, quantity, amount_minor, currency]
+      properties:
+        order_id:
+          type: string
+          maxLength: 64
+          description: 결제 업무 키. 전역 유일(UNIQUE) — 매출 중복 이중 방어
+        product_id: { type: string, maxLength: 64 }
+        product_name: { type: string, maxLength: 128 }
+        quantity: { type: integer, minimum: 1 }
+        amount_minor:
+          type: integer
+          minimum: 0
+          description: 주문 총액(수량 반영, 최소 화폐 단위 정수. 9,900원 → 9900)
+        currency: { type: string, pattern: '^[A-Z]{3}$', example: KRW }
+
+    EventBatchRequest:
+      type: object
+      required: [batch_id, sent_at, events]
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+          description: 요청 추적·응답 대조용 (멱등성 키 아님 — 멱등성은 event_id 단위)
+        sent_at: { type: string, format: date-time }
+        events:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: '#/components/schemas/EventEnvelope' }
+
+    EventBatchResponse:
+      type: object
+      required:
+        - batch_id
+        - received_count
+        - accepted_count
+        - stored_count
+        - duplicate_count
+        - order_duplicate_count
+        - rejected_count
+        - rejected
+      description: |
+        불변식: received = accepted + rejected / accepted = stored + duplicate /
+        order_duplicate ⊆ stored
+      properties:
+        batch_id: { type: string, format: uuid }
+        received_count: { type: integer, description: 배치에 담겨 온 이벤트 수 }
+        accepted_count: { type: integer, description: 형식이 유효한 이벤트 수 (중복 포함) }
+        stored_count: { type: integer, description: 이번 요청으로 원본이 새로 저장된 수 }
+        duplicate_count:
+          type: integer
+          description: event_id PK 충돌로 건너뛴 수. 내용 동일성 검증 결과가 아님
+        order_duplicate_count:
+          type: integer
+          description: 원본은 저장됐으나 order_id UNIQUE 충돌로 결제 파생만 생략된 수 (stored의 부분집합)
+        rejected_count: { type: integer }
+        rejected:
+          type: array
+          items:
+            type: object
+            required: [index, code, message]
+            properties:
+              index: { type: integer, description: 배치 내 위치 (0-base) }
+              event_id: { type: string, format: uuid }
+              code: { type: string, example: INVALID_PAYLOAD }
+              message:
+                type: string
+                maxLength: 200
+                description: 서버 정의 문구. 사용자 입력을 반사하지 않음
+
+    Meta:
+      type: object
+      required: [start, end, page, page_size, total]
+      properties:
+        start: { type: string, format: date }
+        end: { type: string, format: date }
+        page: { type: integer }
+        page_size: { type: integer }
+        total:
+          type: integer
+          description: zero-fill 기준 전체 행 수 (일별 시계열은 달력 일수와 일치)
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: INVALID_DATE_RANGE }
+            message: { type: string, example: start must be less than or equal to end }
+            request_id: { type: string, example: req-7f8dd7 }
+
+  responses:
+    MalformedRequest:
+      description: JSON 파싱 실패 또는 배치 필수 필드 누락 (개별 이벤트 검증 실패는 200 + rejected)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    InvalidParams:
+      description: 잘못된 조회 파라미터 (기간 역전, 366일 초과, 미존재 event_type, 통화 형식 오류 등)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: API 키 누락 또는 무효
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    InstanceMismatch:
+      description: API 키에 매핑된 instance_id와 배치 내 이벤트의 instance_id 불일치
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    PayloadTooLarge:
+      description: 요청 본문 4MB 초과 — 전송측은 배치를 분할 재전송 (design.md §4.2)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: 서버 측 요청 한도 초과
+      headers:
+        Retry-After:
+          description: 재시도까지 대기 시간(초) — 전송측은 jitter를 더해 대기
+          schema: { type: integer, example: 5 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    StorageUnavailable:
+      description: DB 장애·내부 데드라인 초과 등 일시적 저장 불가. 전송측은 재시도
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
