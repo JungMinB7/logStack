@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+.git
+.env
+.env.local
+*.log
+.DS_Store
+.bkit
+.claude
+docs
+test
+README.md
+AGENTS.md
+AI_RULES.md
+CLAUDE.md
