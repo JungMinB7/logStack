@@ -4,6 +4,10 @@
 # v2 변경: 422 제거(항상 200 + per-event 결과), order_duplicate_count 추가,
 #          summary 객체 추가(dau/revenue/purchase-conversion), zero-fill·정렬 계약 명시,
 #          matured 판정·가변 결과 설명 갱신
+# v2.1 (구현 확정 반영): metrics 5종에 503 추가(스냅샷 만료 P2028·연결 오류의
+#          STORAGE_UNAVAILABLE 매핑), 429는 미구현 설계 계약임을 명기,
+#          occurred_at 시간대 지정자 필수, 청크형 비-JSON 400 명기,
+#          문자열 필드 minLength 추가
 
 openapi: 3.0.3
 info:
@@ -107,6 +111,7 @@ paths:
                         dau: { type: integer, example: 2 }
         '400': { $ref: '#/components/responses/InvalidParams' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
 
   /api/v1/metrics/retention:
     get:
@@ -156,6 +161,7 @@ paths:
                             d30: { type: boolean, example: false }
         '400': { $ref: '#/components/responses/InvalidParams' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
 
   /api/v1/metrics/revenue:
     get:
@@ -214,6 +220,7 @@ paths:
                         arpu_minor: { type: string, nullable: true, example: '5000.00' }
         '400': { $ref: '#/components/responses/InvalidParams' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
 
   /api/v1/metrics/purchase-conversion:
     get:
@@ -263,6 +270,7 @@ paths:
                         conversion_rate: { type: number, nullable: true, example: 0.5 }
         '400': { $ref: '#/components/responses/InvalidParams' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
 
   /api/v1/metrics/engagement:
     get:
@@ -313,6 +321,7 @@ paths:
                           example: 0.7
         '400': { $ref: '#/components/responses/InvalidParams' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
 
 components:
   securitySchemes:
@@ -385,8 +394,8 @@ components:
         event_type: { $ref: '#/components/schemas/EventType' }
         user_id: { type: integer, format: int64, example: 1001 }
         character_id: { type: integer, format: int64, example: 2001 }
-        session_id: { type: string, maxLength: 64 }
-        channel_id: { type: string, maxLength: 64 }
+        session_id: { type: string, minLength: 1, maxLength: 64 }
+        channel_id: { type: string, minLength: 1, maxLength: 64 }
         payload:
           type: object
           description: |
@@ -395,7 +404,9 @@ components:
         occurred_at:
           type: string
           format: date-time
-          description: ISO8601 UTC, ms 정밀도
+          description: |
+            ISO8601 UTC, ms 정밀도. 시간대 지정자(Z 또는 ±hh:mm) 필수 —
+            없으면 rejected(INVALID_ENVELOPE)
           example: '2026-07-27T04:15:22.123Z'
 
     ShopPurchasePayload:
@@ -404,10 +415,11 @@ components:
       properties:
         order_id:
           type: string
+          minLength: 1
           maxLength: 64
           description: 결제 업무 키. 전역 유일(UNIQUE) — 매출 중복 이중 방어
-        product_id: { type: string, maxLength: 64 }
-        product_name: { type: string, maxLength: 128 }
+        product_id: { type: string, minLength: 1, maxLength: 64 }
+        product_name: { type: string, minLength: 1, maxLength: 128 }
         quantity: { type: integer, minimum: 1 }
         amount_minor:
           type: integer
@@ -496,12 +508,17 @@ components:
 
   responses:
     MalformedRequest:
-      description: JSON 파싱 실패 또는 배치 필수 필드 누락 (개별 이벤트 검증 실패는 200 + rejected)
+      description: |
+        JSON 파싱 실패 또는 배치 필수 필드 누락 (개별 이벤트 검증 실패는 200 + rejected).
+        Content-Length 없는 청크형 비-JSON 전송의 안전 거부 포함 (design.md §2.3)
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
     InvalidParams:
-      description: 잘못된 조회 파라미터 (기간 역전, 366일 초과, 미존재 event_type, 통화 형식 오류 등)
+      description: |
+        잘못된 조회 파라미터 (기간 역전 INVALID_DATE_RANGE, 366일 초과 RANGE_TOO_LARGE,
+        미존재 event_type UNKNOWN_EVENT_TYPE, 통화 오류 INVALID_CURRENCY 등).
+        날짜·페이지 파라미터의 형식 오류는 MALFORMED_REQUEST 코드로 반환될 수 있음
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -521,7 +538,9 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
     RateLimited:
-      description: 서버 측 요청 한도 초과
+      description: |
+        서버 측 요청 한도 초과. (서버 측 rate limit은 현 구현 범위에서 미적용 —
+        전송측이 상대할 설계 계약으로 유지한다. design.md §13, README 한계 참조)
       headers:
         Retry-After:
           description: 재시도까지 대기 시간(초) — 전송측은 jitter를 더해 대기
@@ -530,7 +549,11 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
     StorageUnavailable:
-      description: DB 장애·내부 데드라인 초과 등 일시적 저장 불가. 전송측은 재시도
+      description: |
+        DB 장애·내부 데드라인 초과 등 일시적 오류 — 재시도 가능(503).
+        적재는 트랜잭션 롤백 후 반환되며 전송측은 재시도한다.
+        지표 조회의 스냅샷 트랜잭션 만료(P2028)·DB 연결 오류(P1001/P1002)도
+        이 응답으로 매핑된다.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }

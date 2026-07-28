@@ -26,6 +26,8 @@ curl http://localhost:3000/health   # {"status":"ok"} 확인
 
 앱 컨테이너가 기동 시 `prisma migrate deploy`로 마이그레이션을 자동 적용한다.
 로컬 개발(핫 리로드)은 `docker compose up -d db` 후 `npm install && npm run start:dev`.
+`GET /health`는 컨테이너 liveness 확인용 운영 편의 엔드포인트로, API 계약
+(docs/api.openapi.yaml) 밖이며 인증이 없다.
 
 ## 2. 환경변수
 
@@ -181,7 +183,9 @@ event_type 생략 시 13개 타입 전체의 (일 × 타입) 격자를 반환한
 공통: 반개구간 `[start, end+1일)` UTC, zero-fill(이벤트 없는 날도 행 반환),
 date ASC 정렬, 최대 366일·page_size 100, 잘못된 파라미터는 400 + 통일 에러 형식
 (`INVALID_DATE_RANGE`, `RANGE_TOO_LARGE`, `INVALID_CURRENCY`, `UNKNOWN_EVENT_TYPE`).
-data와 summary는 REPEATABLE READ 스냅샷에서 함께 읽어 한 응답 내 정합이 보장된다.
+data·summary를 병기하는 3종(dau/revenue/purchase-conversion)은 REPEATABLE READ
+스냅샷에서 함께 읽어 한 응답 내 정합이 보장된다 (retention/engagement는 단일
+쿼리라 자명하게 정합).
 
 ## 6. 샘플 데이터 생성·적재·검증
 
@@ -228,6 +232,9 @@ in-flight 1) = 20 req/s, 배치당 15~150건** — 를 2분간 전송한다.
 ```bash
 npx ts-node scripts/load-check.ts    # 기본 120초. --duration-sec 등 옵션 지원
 ```
+
+과제 구현은 단일 인스턴스 키이므로(A-8), 10개 논리 인스턴스는 **단일 키·동일
+instance_id로 시뮬레이션**된다 (전송 패턴만 재현).
 
 실제 실행 결과 (로컬 docker compose, 2026-07-28):
 
