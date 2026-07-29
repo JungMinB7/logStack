@@ -10,6 +10,7 @@
 | 문서 | 내용 |
 |---|---|
 | [docs/design.md](docs/design.md) | [문제 1] 설계 문서 — 제약 분석, 아키텍처, API·스키마·지표 정의 |
+| [docs/design.pdf](docs/design.pdf) | 위 설계 문서의 PDF 판 (`npm run docs:pdf`로 재생성) |
 | [docs/api.openapi.yaml](docs/api.openapi.yaml) | API 계약 (단일 기준) |
 | [docs/assumptions.md](docs/assumptions.md) | 가정 목록 (A-1 ~ A-32) |
 | [docs/decisions.md](docs/decisions.md) | ADR (브로커 미도입, 3층 구조) |

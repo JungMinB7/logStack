@@ -63,31 +63,11 @@ RPG 게임의 유저 행동 로그를, 제약이 있는 HTTP 전송 환경에서
 
 ## 3. 전체 아키텍처
 
-```mermaid
-flowchart LR
-    subgraph Senders["전송측 (게임 인스턴스 ×10~300)"]
-        GI[게임 인스턴스<br/>로컬 outbox + 1초 배칭<br/>순차 전송]
-    end
+![전체 아키텍처 다이어그램](architecture.svg)
 
-    subgraph Server["적재 서버 (Node.js / NestJS)"]
-        LB[HTTPS 443<br/>리버스 프록시/TLS 종료]
-        AUTH[API Key Guard<br/>인증·인스턴스 검증]
-        ING[Ingestion<br/>Controller→Service→Repository]
-        MET[Metrics<br/>Controller→Service→Repository]
-    end
-
-    subgraph Storage["저장소"]
-        PG[(PostgreSQL<br/>game_events + purchases)]
-    end
-
-    OP[운영자/분석가]
-
-    GI -- "POST /api/v1/event-batches<br/>(배치 JSON, ≤4MB)" --> LB
-    LB --> AUTH --> ING
-    ING -- "트랜잭션: 원본 INSERT<br/>+ 결제 파생 INSERT" --> PG
-    OP -- "GET /api/v1/metrics/*" --> MET
-    MET -- "집계 SQL (occurred_at 기준)" --> PG
-```
+> 다이어그램 원본은 docs/architecture.svg (직접 관리). 구조 변경 시 SVG를 직접
+> 수정하고 `npm run docs:pdf`로 PDF를 갱신한다. 실선은 구현 범위(문제 2), 점선은
+> 설계 범위(문제 1)를 나타낸다.
 
 ### 3.1 구성 선택 근거와 트레이드오프
 

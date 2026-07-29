@@ -1,0 +1,23 @@
+flowchart LR
+    subgraph Senders["전송측 (게임 인스턴스 ×10~300)"]
+        GI[게임 인스턴스<br/>로컬 outbox + 1초 배칭<br/>순차 전송]
+    end
+
+    subgraph Server["적재 서버 (Node.js / NestJS)"]
+        LB[HTTPS 443<br/>리버스 프록시/TLS 종료]
+        AUTH[API Key Guard<br/>인증·인스턴스 검증]
+        ING[Ingestion<br/>Controller→Service→Repository]
+        MET[Metrics<br/>Controller→Service→Repository]
+    end
+
+    subgraph Storage["저장소"]
+        PG[(PostgreSQL<br/>game_events + purchases)]
+    end
+
+    OP[운영자/분석가]
+
+    GI -- "POST /api/v1/event-batches<br/>(배치 JSON, ≤4MB)" --> LB
+    LB --> AUTH --> ING
+    ING -- "트랜잭션: 원본 INSERT<br/>+ 결제 파생 INSERT" --> PG
+    OP -- "GET /api/v1/metrics/*" --> MET
+    MET -- "집계 SQL (occurred_at 기준)" --> PG
