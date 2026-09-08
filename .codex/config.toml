@@ -1,0 +1,16 @@
+# 프로젝트 루트의 .codex/config.toml
+# 현재 공식 standalone-agent 형식. 기존 설정에는 중복 없이 병합한다.
+# default_permissions / [permissions.*] 방식과 이 sandbox_mode 방식을 혼용하지 않는다.
+# 모델·추론 강도·로그인·MCP·전역 설정은 이 프로젝트 파일에서 고정하지 않는다.
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 2
+interrupt_message = true
+
+# .codex/agents/*.toml의 name/description/developer_instructions로 역할을 정의한다.
+# 같은 역할을 [agents.<name>]에 다시 중복 등록하지 않는다.
+# 스킬은 .agents/skills/<name>/SKILL.md에 둔다. 여기에 역할별 tools/skills 목록을 만들지 않는다.
+# 위 2는 자식 스레드 동시 상한이지 총 토큰·크레딧 상한이 아니다.

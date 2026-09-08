@@ -1,0 +1,6 @@
+interface:
+  display_name: T8 AWS 실측·시연
+  short_description: AWS 장애 3종·독립 ID 정합·재현성 증거를 수집한다.
+  default_prompt: $t8-aws-verification 스킬을 사용해 현재 저장소와 승인 범위를 먼저 확인하고 해당 절차를 수행해줘. 미승인 변경과 실제 AWS 적용은 하지 마.
+policy:
+  allow_implicit_invocation: false

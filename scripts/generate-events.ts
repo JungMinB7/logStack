@@ -53,14 +53,17 @@ function rngUuid(rng: () => number): string {
   return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20)}`;
 }
 
-interface ActivitySpec {
+export interface ActivitySpec {
   type: string;
   weight: number;
   payload: (rng: () => number) => Record<string, unknown>;
 }
 
-/** design.md §8.2의 payload 예시를 따르는 활동 이벤트 분포 (고빈도 이벤트 위주) */
-const ACTIVITIES: ActivitySpec[] = [
+/**
+ * design.md §8.2의 payload 예시를 따르는 활동 이벤트 분포 (고빈도 이벤트 위주).
+ * sender 데몬(sender/src/generator.ts)이 같은 분포를 재사용한다 (design-aws.md §4-1).
+ */
+export const ACTIVITIES: ActivitySpec[] = [
   {
     type: 'monster_kill',
     weight: 45,
@@ -130,7 +133,7 @@ const ACTIVITIES: ActivitySpec[] = [
   },
 ];
 
-function pickActivity(rng: () => number): ActivitySpec {
+export function pickActivity(rng: () => number): ActivitySpec {
   const total = ACTIVITIES.reduce((sum, a) => sum + a.weight, 0);
   let r = rng() * total;
   for (const activity of ACTIVITIES) {

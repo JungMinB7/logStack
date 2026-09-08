@@ -1,5 +1,3 @@
-# AGENTS.md
-
 ## 작업 전 반드시 읽을 파일
 1. AI_RULES.md
 2. docs/spec.md

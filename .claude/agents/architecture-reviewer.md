@@ -17,7 +17,6 @@ docs/spec.md, docs/assumptions.md, docs/decisions.md, docs/design.md 를 읽어�
 3. 순서 역전(occurred_at 기준 집계, received_at 분리 저장)이 처리되었는가
 4. 저장 스키마가 필수 지표 4종(DAU, 리텐션, 매출/ARPU, 전환율)을 산출 가능한가
 5. 3층 구조 규칙 위반이 없는가:
-   - Controller에서 Prisma 직접 호출
    - Repository 밖의 SQL
    - Service의 Express Request/Response 참조
 6. 트레이드오프와 가정이 문서에 명시되었는가

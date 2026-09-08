@@ -1,0 +1,6 @@
+interface:
+  display_name: T9 동료용 대시보드
+  short_description: 지표 5종 화면과 외부 적재404 경계를 검증한다.
+  default_prompt: $t9-dashboard 스킬을 사용해 현재 저장소와 승인 범위를 먼저 확인하고 해당 절차를 수행해줘. 미승인 변경과 실제 AWS 적용은 하지 마.
+policy:
+  allow_implicit_invocation: false

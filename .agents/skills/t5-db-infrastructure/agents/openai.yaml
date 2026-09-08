@@ -1,0 +1,6 @@
+interface:
+  display_name: T5 DB 인프라
+  short_description: PostgreSQL 16·gp3·백업·chrony 구현을 단계별로 진행한다.
+  default_prompt: $t5-db-infrastructure 스킬을 사용해 현재 저장소와 승인 범위를 먼저 확인하고 해당 절차를 수행해줘. 미승인 변경과 실제 AWS 적용은 하지 마.
+policy:
+  allow_implicit_invocation: false

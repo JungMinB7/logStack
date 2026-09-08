@@ -1,0 +1,6 @@
+interface:
+  display_name: T7 전송 배포
+  short_description: 검증된 sender를 10대 인스턴스에 배포 준비한다.
+  default_prompt: $t7-sender-deployment 스킬을 사용해 현재 저장소와 승인 범위를 먼저 확인하고 해당 절차를 수행해줘. 미승인 변경과 실제 AWS 적용은 하지 마.
+policy:
+  allow_implicit_invocation: false

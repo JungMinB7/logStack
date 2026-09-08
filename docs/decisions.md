@@ -30,5 +30,5 @@ Port/Adapter 추상화, Domain Entity와 Prisma Model 분리는 하지 않는다
   추출하는 것만으로 Port/Adapter 구조로 점진 전환 가능
 
 ### 트레이드오프
-- Service가 Prisma 타입에 간접적으로 노출될 수 있음
+- --Service가 Prisma 타입에 간접적으로 노출될 수 있음--(x -> TypeORM으로 교체)
 - Service 단위 테스트 시 Repository를 jest.mock으로 대체 (인터페이스가 없어도 가능)

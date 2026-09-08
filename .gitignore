@@ -12,6 +12,7 @@
 # logs
 *.log
 npm-debug.log*
+/sender/outbox-data/
 
 # OS
 .DS_Store
