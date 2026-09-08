@@ -30,7 +30,7 @@ output "endpoints" {
 
 output "instance_management" {
   value = { for name, role in aws_iam_role.ec2 : name => {
-    role_arn = role.arn, instance_profile_name = aws_iam_instance_profile.ec2[name].name
+    role_arn             = role.arn, instance_profile_name = aws_iam_instance_profile.ec2[name].name
     instance_profile_arn = aws_iam_instance_profile.ec2[name].arn
   } }
 }

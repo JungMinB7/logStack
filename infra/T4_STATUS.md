@@ -2,8 +2,9 @@
 
 기준일: 2026-09-09 KST. 이 문서는 AWS 실측 보고나 T4 완료 보고가 아니다.
 
-**최신 상태는 §9 재개 기록을 우선한다. §1~8은 이전 사전검토의 이력으로 보존한다.
-이전의 역할 복구 전 구현 금지·코드 없음·재개 프롬프트는 이번 사용자 요청 및 §9로 대체됐다.**
+**최신 bootstrap 적용 인수·실제 runtime plan은 §12를 우선한다. §11은 bootstrap plan, §10은 도구/정적 검증 이력이다.
+이전의 역할 복구 전 구현 금지·코드 없음·도구 미설치·재개 프롬프트는 이번 사용자 요청 및 §10으로 대체됐다.
+특히 §7의 sudo/전역 설치 예시는 과거 미실행 이력이며 이번 설치·재개 절차로 사용하지 않는다.**
 
 ## 1. 현재 중단점과 승인 근거
 
@@ -367,3 +368,408 @@ bootstrap/runtime **실제 plan 생성·변경·삭제·교체 수는 각각 미
 
 작성 종료 시 Git: 기존 staged7 유지, infra/AGENTS.md·T4_STATUS.md·TEARDOWN.md는 추가 unstaged 변경(AM),
 신규 untracked는 infra/.gitignore·README.md·bootstrap/·runtime/이다. git stage 작업은 수행하지 않았다.
+
+## 10. T4 실행 검증 재개 (2026-09-09 KST)
+
+사용자 원본: `/Users/ljm/.codex/attachments/35f89f5f-e7d1-4e67-b69d-928eebea5e96/pasted-text.txt`.
+이번 요청은 기존 14개 Terraform 코드의 도구 준비·실행 검증이다. T4 preflight·T3 소크를 반복하지 않았다.
+시작 루트 `/Users/ljm/Desktop/logStack`, `main`, HEAD `bde9f071a1e6124cd664a6049e7b9dfade979df7`;
+staged/unstaged/untracked 모두 없었다. 이전 §9의 staged 7개 상태를 현재 상태로 사용하지 않는다.
+메인은 사용자 경로 도구 설치, infra-developer는 infra/ 단일 작성·검증을 담당했다. 재위임·Git 조작 없음.
+
+### 도구 설치·무결성 (메인 실행 증거 인수)
+
+| 도구 | 현재 경로·실행 결과 | 출처·무결성 |
+|---|---|---|
+| Terraform | `/Users/ljm/.local/share/terraform/1.14.9/terraform`; `version` exit0, v1.14.9 darwin_arm64 | 기존 `>=1.10,<2.0` 및 S3 잠금 제약 유지. [공식 1.14.9](https://releases.hashicorp.com/terraform/1.14.9/) ZIP SHA256 `5bc0b11b7a63c8984a41d82523356df46f7833c2e9651a39a7f8919422de5cde`; 서명된 SHA256SUMS와 일치 |
+| AWS CLI v2 | `/Users/ljm/.local/share/aws-cli/aws`; `--version` exit0, aws-cli/2.36.40 Python/3.14.6 Darwin/25.6.0 exe/arm64 | [공식 패키지](https://awscli.amazonaws.com/AWSCLIV2-2.36.40.pkg) SHA256 `05c061370c107a5214cb6477b80923ab837d4ba194fc04b8d01062882c080d1f`; Apple 신뢰 AMZN Mobile LLC(94KV3E626L) 서명·notarization 확인 |
+
+Terraform SHA256SUMS GPG 서명은 공식 trust/security 정보와 대조한 primary fingerprint
+`C874011F0AB405110D02105534365D9472D7468F`의 good signature였다. 로컬 trust 미설정 경고는 남았으며 서명 오류와 구분했다.
+macOS codesign의 최초 sandbox 검사는 exit1:
+`invalid signature (code or signature have been modified) In architecture: arm64`.
+정식 도구 승인 후 동일 바이너리의 외부 검사는 exit0, `valid on disk / satisfies its Designated Requirement`,
+TeamIdentifier `D38WU7D763`이었다. 바이너리 변경·재서명·보호 우회는 하지 않았다.
+
+AWS CLI는 [공식 macOS 현재 사용자 설치](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)를 따랐다.
+installer showChoices 최초 sandbox exit1: `Error trying to locate CurrentUserHomeDirectory domain`;
+정식 도구 승인 읽기 재검사 exit0, customLocation `/Users/ljm/.local/share`, CurrentUserHomeDirectory 설치 exit0.
+패키지는 `/Users/ljm/.local/share/aws-cli-downloads/2.36.40/AWSCLIV2.pkg`에 보존했다.
+sudo·관리자 암호·전역 링크·Homebrew·셸 초기화 파일 변경은 없었다. 성공은 installer 종료 코드뿐 아니라 실제 버전 실행으로 확인했다.
+
+### 초기화 전 상태와 증거 보존
+
+- 양 root의 기존 backend 메타데이터·`.terraform`·state·실제 tfvars/backend.hcl·lockfile은 없었다.
+  provider source는 `hashicorp/aws`, 제약 `~>6.0`이며 버전 제약을 완화하지 않았다.
+- 정상 backend/state를 삭제하거나 이동하지 않았다. 원본 두 root에서 `-backend=false -input=false` 검증한다.
+  별도 코드 복제·임시 local backend·실제 계정 placeholder·mock·인증 생략 plan은 사용하지 않는다.
+- 로그 루트: `/Users/ljm/Desktop/logStack/infra/.terraform/t4-execution-20260909/`.
+  기존 `infra/.gitignore`에 의해 제외되고 디렉토리0700, 로그0600(umask077)이다.
+  초기 코드14개 SHA256은 `00-initial-code-hashes.log`, 최종 코드/lockfile 해시는 `15-final-code-lock-hashes.log`를 사용한다.
+  ignored 로그는 로컬 증거이며 Git 이력에 보관됐다는 뜻이 아니다. T3 증거는 수정하지 않았다.
+
+### 실행 결과
+
+아래 모든 Terraform 명령은 위 절대 경로 CLI를 사용했다. 명령별 종료 코드는 각 로그에 기록하며,
+로그용 래퍼의 종료 코드로 Terraform 실패를 덮어쓰지 않는다. 양 root의 공식 provider 다운로드·서명 확인은 완료했다.
+
+| 명령 | 상태·종료 코드 | 로그 파일 |
+|---|---|---|
+| `fmt -recursive infra` | PASS, 0 | `01-fmt.log` |
+| `fmt -check -recursive infra` | PASS, 0 | `02-fmt-check.log` |
+| bootstrap `init -backend=false -input=false` 최초 | FAIL, 1 — registry DNS 조회 실패 | `03-bootstrap-init.log` |
+| bootstrap `validate` 최초 | FAIL, 1 — provider 미설치 | `04-bootstrap-validate.log` |
+| runtime `init -backend=false -input=false` 최초 | FAIL, 1 — registry DNS 조회 실패 | `05-runtime-init.log` |
+| runtime `validate` 최초 | FAIL, 1 — provider 미설치 | `06-runtime-validate.log` |
+| bootstrap init 정식 승인 재시도 | PASS, 0; AWS6.63.0 HashiCorp 서명 설치, lockfile 생성 | `03b-bootstrap-init-retry.log` |
+| bootstrap validate 정식 승인 재시도 | PASS, 0; 오류·경고 없음 | `04b-bootstrap-validate-retry.log` |
+| runtime init 정식 승인 재시도 | PASS, 0; AWS6.63.0 HashiCorp 서명 설치, lockfile 생성 | `05b-runtime-init-retry.log` |
+| runtime validate 정식 승인 재시도 | PASS, 0; 오류·경고 없음 | `06b-runtime-validate-retry.log` |
+| `npm run lint` | PASS, 0 | `07-lint.log` |
+| `npm run build` | PASS, 0 | `08-build.log` |
+| `npm test -- --runInBand` | PASS, 0; 서버 단위12개 | `09-unit.log` |
+| 최종 `fmt -recursive infra` / `fmt -check -recursive infra` | 각각 PASS, 0; 추가 포맷 변경 없음 | `10-final-fmt.log`, `11-final-fmt-check.log` |
+| 최종 bootstrap/runtime validate sandbox 실행 | 각각 FAIL, 1; provider plugin schema 실행 실패 | `12-final-bootstrap-validate.log`, `13-final-runtime-validate.log` |
+| 최종 bootstrap validate 정식 도구 승인 재시도 | PASS, 0; 오류·경고 없음 | `16-final-bootstrap-validate-retry.log` |
+| 최종 runtime validate 정식 도구 승인 재시도 | PASS, 0; 오류·경고 없음 | `17-final-runtime-validate-retry.log` |
+| e2e | NOT_RUN, 종료 코드 없음 — 격리 하네스의 안전 대상 미확인 | ingestion125~126/metrics56~57 deleteMany 확인 |
+| sender 통합·30분 소크 | NOT_RUN, 종료 코드 없음 | 재실행 금지 준수 |
+| 실제 backend init·STS/AZ/서비스/backend 조회 | BLOCKED / NOT_RUN, 종료 코드 없음 | 인증 프로파일·backend 미확정 |
+| bootstrap/runtime 실제 plan | BLOCKED / NOT_RUN, 종료 코드 없음 | 양쪽 생성·변경·삭제·교체 **미산출**, 0 아님 |
+| apply/destroy/test/import/state/force-unlock | NOT_RUN, 종료 코드 없음 | AWS CLI/SDK 우회 변경도 없음 |
+
+최초 오류 원문: `lookup registry.terraform.io: no such host` / `Missing required provider`.
+다운로드는 정식 도구 승인으로 재시도하며 최초 로그를 보존한다. `init -upgrade`는 사용하지 않았다.
+fmt는 runtime/endpoints.tf·iam.tf·outputs.tf의 공백 정렬만 변경했다. 현재까지 승인 설계·SG·IAM·시크릿·삭제 보호의 의미 변경은 없다.
+양 root lockfile은 실제 init 산출물이며 registry.terraform.io/hashicorp/aws `6.63.0`, constraint `~>6.0`이다.
+lockfile 자체는 ignore하지 않으며 Git에 추가할 수 있는 상태로 보존한다. 이번에 git add/commit하지 않았다.
+최종 sandbox validate 오류 원문은 `Failed to load plugin schemas`, `Unrecognized remote plugin message`,
+`Failed to read any lines from plugin's stdout`이다. ARM64 일치·실행권한 존재도 로그에 표시됐다.
+같은 코드·provider로 정식 승인 재검증하며 오류를 코드 결함으로 단정하거나 바이너리를 변경하지 않았다.
+최종 재시도는 UTC18:01:22~18:01:25(2026-09-09 KST03:01:22~03:01:25)에 각각 성공했다.
+두 lockfile은 바이트 단위 동일(cmp exit0)이다. schema 성공은 AWS 계정·리전·권한·backend plan 통과가 아니다.
+
+### 독립 감사 상태
+
+이번 infra-reviewer 실제 호출은 `unknown agent_type 'infra-reviewer'`로 실패했다.
+`infra/AGENTS.md`가 허용한 대체 절차에 따라 메인이 구현에 참여하지 않은 새 일반 자식 `/root/t4_final_review`를 호출하고
+동일 역할 지침·infra-audit를 직접 읽는 읽기 전용 최종 감사를 위임했다. 역할 등록 복구로 보고하지 않는다.
+대체 독립 리뷰어는 최종 코드14개·양 lockfile의 현재 SHA256과 `15-final-code-lock-hashes.log` 일치,
+최종 validate `16`/`17` 로그 각각 exit0·무경고를 대조했다. 최종 코드·lockfile·로컬 검증은 수용됐으며
+새 발견 High0/Med0/Low0이다. 실제 plan은 없어 plan 독립 검토는 BLOCKED / NOT_RUN이다.
+§9의 과거 코드 감사 0건을 이번 코드/plan 감사 결과로 재사용하지 않는다.
+
+### 변경·회귀·비용·최종 Git
+
+- 수정: `infra/README.md`, `infra/T4_STATUS.md`; Terraform fmt의 `runtime/endpoints.tf`, `iam.tf`, `outputs.tf` 공백 정렬.
+- 신규: `infra/bootstrap/.terraform.lock.hcl`, `infra/runtime/.terraform.lock.hcl` 두 실제 init 산출물.
+- Terraform 의미 변경·오류 수정을 위한 리소스/보안 축소는 없었다. provider6.63.0 선택은 기존 제약 안에서 최초 init이 수행했다.
+- lint/build/unit12는 현재 실행 PASS(exit0). e2e는 기존 데이터 삭제 위험과 격리 대상 미확인으로 NOT_RUN,
+  T3 소크·통합은 재실행하지 않았다. 기존 프로세스/서비스/DB/T3 증거를 중단·초기화·정리하지 않았다.
+- 비용 구성 변화 없음. 기존 서울 확인일2026-09-09, 48/72시간의 T4 NAT1/EIP1/Interface3×2AZ 고정비
+  $6.816/$10.224 산식은 유지한다. 이번 AWS 자원 적용·청구 실측·가격 재조회는 없으며 사용량·보존비·세금 등은 §5처럼 별도다.
+- 실제 plan 생성·변경·삭제·교체는 두 root 모두 미산출이며 비용이 0이거나 변화 없음 plan이라는 뜻이 아니다.
+- 최종 `git diff --check`, `git diff --cached --check`, 승인 범위 밖 `git diff --exit-code` 모두 exit0.
+  main/시작 HEAD 유지, staged 없음. unstaged5개(위 수정), untracked2개(위 lockfile), 범위 밖 추적 변경 없음.
+  `.terraform`·검증 로그·빌드 산출물은 ignored 로컬 결과이며 기존 ignored T3 자료는 보존했다.
+
+### 미확정 S3·Logs의 기능 영향과 개방 시점
+
+| 기능 | 현재 계약·영향 | 담당 단계 / 필요한 실제 입력·승인 |
+|---|---|---|
+| 기본 SSM 등록·Session Manager 메시지 채널 | modern Agent 사전 설치 전제, UpdateInstanceInformation·Create/Open Control/Data Channel만. S3/Logs와 별도 경로이나 실제 세션은 미검증 | T4 관리 기반 / 첫 인스턴스 연결 전에 Agent 버전·operator 권한·Session Manager preferences 확인 |
+| Standard_Stream 세션의 S3·CloudWatch 로깅 또는 세션 KMS 요구 | 현재 Deny/권한 부재로 사용할 수 없음. 계정 정책에서 이를 필수로 요구하면 세션을 막을 수 있으므로 무조건 운영 가능 판정 금지 | 첫 관리 연결 전 해결 항목. 정확한 버킷/prefix·로그그룹 ARN·필요 KMS ARN·세션 정책을 승인받고 한정 개방; 기록/암호화 설정을 임의로 끄지 않음 |
+| Agent 설치·업데이트·패치·inventory·외부 스크립트 | 기본 IAM 전체 기능이 아니며 빈 S3 Endpoint는 Deny. 사전 AMI를 실제 확인하지 않음 | T5 이전 신뢰 AMI/버전·공급 계약. S3 필요 시 지역별 승인 버킷·객체 prefix와 역할을 `s3_read_paths`에 지정 |
+| PG16·chrony 공급 | DB에 인터넷 경로 없음, 빈 계약이면 S3 egress도 없음 | T5 AMI 우선. 없으면 승인된 오프라인 공급안; 임시 NAT/IGW 금지 |
+| pg_dump 백업 | 현재 S3 GetObject read-path 입력으로는 쓰기 불가 | T5 버킷/접두사 ARN·PutObject 등 최소 쓰기·암호화·보존 정책을 별도 구현 승인 |
+| receiver/sender CloudWatch 로그 | logs Private DNS가 Endpoint를 가리키므로 앱 NAT HTTPS가 있어도 해당 기본 경로는 Deny. 로그 수집 준비 완료 아님 | T6 receiver/T7 sender 시작 전 로그그룹·stream ARN, 보존 기간, 역할별 최소 IAM/Endpoint 정책 확정 |
+
+기본 통신과 후속 기능 구분의 근거는 [AWS SSM VPC 지침](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-create-vpc.html)의
+SSM 메시지 채널·S3 업데이트/파일·선택 Logs 설명이다. 계정의 세션 로깅 영향은
+[AWS 세션 로그 설정](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-logging-cloudwatch-logs.html)과
+[로그 통합 오류 안내](https://repost.aws/knowledge-center/cloudwatch-troubleshoot-session-manager)를 따른다.
+이 구분은 코드·문서 분석이며 AWS 실행 성공 증거가 아니다. 광범위 Allow/Resource=*를 추가해 차단을 우회하지 않았다.
+SSH·포트포워딩은 [Session Manager 세션 로깅 미지원](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-logging.html)이므로
+로그 Deny가 모든 포트포워딩을 차단한다고 단정하지 않는다. 기본5개 action은
+[AWS 최소 인스턴스 정책](https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-create-iam-instance-profile.html)에 대응한다.
+
+### 지금 필요한 사람 작업과 재개
+
+서울·승인 계정 `324037288068`은 받은 값이다. 사용 프로파일/로그인 방식의 최종 선택과 backend는 아직 미확정이다.
+도메인·Zone·T9 CIDR·EC2 타입은 현재 plan 입력의 새 블로커로 만들지 않는다.
+
+| 필요한 비밀값 없는 입력 | 다음 행동 |
+|---|---|
+| 실제 사용할 프로파일 이름·로그인 방식 | 현재 프로파일 목록0. IAM 콘솔 사용자라면 사람이 `aws login` 지원/권한을 확인; Identity Center이면 그에 맞는 SSO 절차 사용 |
+| 기존 재사용 / 신규 bootstrap / 미정 | 기존이면 버킷·리전·key·잠금·역할 정보. 신규이면 실제 새 버킷 이름과 runtime key 승인 |
+
+사람 실행 후보(제안 프로파일을 선택한 뒤):
+`/Users/ljm/.local/share/aws-cli/aws login --profile logstack-t4 --region ap-northeast-2`.
+로그인에 필요한 `SignInLocalDevelopmentAccess` 권한은 관리자 준비 사항이며 에이전트가 추가하지 않는다.
+CLI 성공과 Terraform provider/backend 인증 성공은 별도다. 필요하면 공식 지원 방식의 credential_process를 사람이 구성하되
+`export-credentials`의 원문을 터미널·보고서에 출력하지 않는다. MFA·SSO 코드·키·토큰·비밀번호는 요청하거나 기록하지 않는다.
+[공식 로그인 안내](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html).
+
+입력 후의 실제 파일은 `infra/bootstrap/terraform.tfvars`, `infra/runtime/terraform.tfvars`, `infra/runtime/backend.hcl`이며
+기존 ignore를 먼저 확인하고 자격증명 없이 로컬에만 둔다. placeholder로 실행하지 않는다.
+승인 프로파일 STS와 계정·리전·AZ/Endpoint·backend 소유/권한·default workspace를 대조한 뒤 README의 실제 plan 절차로 간다.
+신규이면 bootstrap 정상 로컬 backend의 저장 plan → 독립 리뷰 → 사람 최초 apply 대기 순서다.
+현재 저장 plan이 없어 **지금 실행할 사람 apply 명령이나 승인된 apply 대상은 없다**.
+기존 backend이면 bootstrap은 중복 소유하지 않고 NOT_APPLICABLE 근거를 남긴 뒤 runtime으로 간다.
+
+재개 프롬프트:
+
+> /Users/ljm/Desktop/logStack의 AGENTS.md·infra/AGENTS.md와 infra/T4_STATUS.md §10·infra/README.md를 읽고 T4를 이어라.
+> 기존 .tf14개와 실제 lockfile/검증 증거를 보존하고 사전검토·도구 설치·T3 소크를 반복하지 마라.
+> Terraform /Users/ljm/.local/share/terraform/1.14.9/terraform, AWS /Users/ljm/.local/share/aws-cli/aws를 사용한다.
+> 승인 계정324037288068·서울과 사람이 제공한 실제 프로파일/backend만 사용해 인증·AZ/서비스/상태 정보를 읽기 전용 확인하라.
+> 로그인·backend가 준비된 범위에서 실제 저장 plan(-input=false -detailed-exitcode)을 생성하고 독립 리뷰를 받아라.
+> 신규 backend이면 bootstrap plan 검토 후 사람 최초 apply 대기에서 멈춰라. runtime backend를 가짜 local 상태로 바꾸지 마라.
+> AI apply/destroy/test/import/state/force-unlock·권한 확장·시크릿 조회·Git 조작·T5 리소스 추가는 금지다.
+
+현재 T4 전체 완료가 아니다. 실제 runtime plan과 그 독립 리뷰, 사람 apply·AWS 연결 실측은 별도 남은 단계다.
+
+## 11. 승인 입력으로 신규 bootstrap 실제 plan (2026-09-09 KST)
+
+사용자는 `aws login` 완료 후 `logstack-t4` 프로파일, 신규 상태 버킷 `logstack-bucket`,
+향후 runtime key `runtime/terraform.tfstate`를 최종 승인했다. 계정 `324037288068`, 서울 `ap-northeast-2`는 유지한다.
+§10의 프로파일·backend 미입력 상태는 이제 과거 이력이다. 계정 인증 정보·토큰·비밀번호는 문서/변수/로그에 넣지 않았다.
+
+시작 main/HEAD `bde9f071a1e6124cd664a6049e7b9dfade979df7` 유지. 기존 unstaged5개와 lockfile untracked2개를 보존했다.
+infra-developer 단일 작성·Terraform 실행, 메인은 AWS 읽기 전용 확인과 독립 리뷰를 조율했다. 재위임·Git 조작 없음.
+
+### 메인 AWS 읽기 전용 확인 인수
+
+모든 조회는 승인된 `--profile logstack-t4 --region ap-northeast-2`를 사용했다.
+아래는 메인이 직접 실행하여 전달한 결과이며 infra-developer가 다시 AWS CLI 호출한 결과는 아니다.
+
+| 조회 | 결과·종료 코드·한계 |
+|---|---|
+| STS GetCallerIdentity | 최초 sandbox exit255 `Could not connect to the endpoint URL: https://sts.ap-northeast-2.amazonaws.com/`; 정식 승인 재시도 exit0. 계정324037288068·승인 IAM 사용자 일치 |
+| HeadBucket logstack-bucket + expected-bucket-owner | exit254, `(404) ... Not Found` |
+| ListBuckets prefix + 정확한 이름 필터 | exit0, `[]`. 승인 계정에 동명 소유 버킷 없음. AccessDenied를 부재로 해석한 것이 아님 |
+| AZ a/c | exit0, 일반 AZ·available·opt-in-not-required. a=apne2-az1, c=apne2-az3 |
+| Endpoint 정확4서비스 | exit0, ssm/ssmmessages/logs Interface 각각 a/c·Private DNS·정책 지원. S3 Gateway a/c·정책 지원. 조회된 S3 Interface는 채택하지 않음 |
+| 해당 리전 VPC CIDR | exit0, 기존 default 172.31.0.0/16만 관측; 조회 범위에서 승인10.0.0.0/16과 중복 없음 |
+| 해당 리전 VPN connections | exit0, `[]`. 로컬·온프레미스 VPN/다른 리전/모든 피어링의 중복 부재를 증명하지 않음 |
+
+S3 이름의 글로벌 예약·실제 생성 성공을 보장하지 않는다. 사람 apply 시 BucketAlreadyExists 등 충돌이면 중단하고
+새 승인 이름을 받아 plan·리뷰를 새로 수행한다. 기존 타인/공유 버킷 import·재소유 또는 우회 생성 금지.
+
+### 실제 입력·backend·workspace·검증
+
+- `infra/bootstrap/terraform.tfvars`만 신규 생성했다. 승인 account/bucket/Project/Environment 식별자만 있으며
+  파일0600, 기존 ignore 적용을 먼저 확인했다. runtime tfvars/backend.hcl은 아직 만들거나 실제 초기화하지 않았다.
+- 기존 `.terraform.lock.hcl`·provider6.63.0을 재사용했다. .tf 의미 변경·lockfile 변경·init -upgrade 없음.
+- init 전 bootstrap `.terraform`에는 provider만 있고 backend 메타데이터/state가 없었다.
+  TF_WORKSPACE/TF_DATA_DIR/TF_CLI_ARGS/TF_LOG 계열 override는 unset이었다.
+- 기존 코드의 정상 local backend를 init했다. `.terraform/terraform.tfstate`는 local backend 메타데이터이며
+  원격 state나 실제 리소스 state를 옮긴 것이 아니다. `workspace show`는 `default`, 생성/전환 없음.
+- Terraform은 프로세스 범위 `AWS_PROFILE=logstack-t4`, `AWS_REGION=AWS_DEFAULT_REGION=ap-northeast-2`를 사용했다.
+  provider allowed_account_ids를 유지한 실제 plan이 성공했다. 이 AWS provider6.63.0 인증에는 별도 credential_process가 필요하지 않았다.
+  **runtime S3 backend 인증 성공까지 검증한 것은 아니다.** ~/.aws·셸 설정·자격증명 export 수정/실행은 없었다.
+
+접근 제한 ignored 증거 디렉토리:
+`/Users/ljm/Desktop/logStack/infra/.terraform/t4-bootstrap-plan-20260909/` (디렉토리0700, 파일0600).
+Terraform 실행 파일은 `/Users/ljm/.local/share/terraform/1.14.9/terraform`이며 명령은 저장소 루트 기준이다.
+
+| 명령 | 상태·종료 코드 | 증거 |
+|---|---|---|
+| source/input/lock SHA256 | PASS, 0 | `00-source-input-lock-hashes.log` |
+| `-chdir=infra/bootstrap init -input=false` | PASS, 0; 정상 local backend, 기존 provider/lock 재사용 | `01-bootstrap-init.log` |
+| `-chdir=infra/bootstrap validate` | PASS, 0; 오류·경고 없음 | `02-bootstrap-validate.log` |
+| `-chdir=infra/bootstrap workspace show` | PASS, 0; default | `03-bootstrap-workspace.log` |
+| `-chdir=infra/bootstrap plan -input=false -detailed-exitcode -out=/Users/ljm/Desktop/logStack/infra/.terraform/t4-bootstrap-plan-20260909/bootstrap.tfplan` | **PASS, 2**; 변경 있는 정상 계획. 2026-09-08 UTC18:23:11 완료 | `04-bootstrap-plan.log`, `bootstrap.tfplan` |
+| `-chdir=infra/bootstrap show -json <위 plan>` | PASS, 0; JSON 전체는 로컬에만 보관 | `05-bootstrap-show.log`, `bootstrap-plan.json` |
+| 최종 코드/input/lock/plan/JSON SHA256 | PASS, 0 | `06-plan-code-input-lock-hashes.log` |
+| runtime 실제 init/plan | BLOCKED / NOT_RUN | 사람의 신규 상태 버킷 최초 apply·사후 확인 전 실행하지 않음 |
+| apply/destroy/test/import/state/force-unlock | NOT_RUN | CLI/SDK 우회 변경·리소스 생성도 없음 |
+| 앱 회귀/e2e/소크 | NOT_RUN (이번 입력/plan 단계) | 의미 코드 변경 없음. §10 실제 안전 회귀 결과와 구분 |
+
+plan 파일 SHA256: `fce9c51c88247b76ef60d48b4d18427f4ba4a003aada887f515dcbb557c02dcd`.
+JSON SHA256: `8244eb712cd6e586851a60e0f3f1978e51248992be2e67b8fdde92e9b4a08dfc`.
+plan 생성 전후 코드·입력·provider를 변경하지 않았다. plan의 `-target`, `-refresh=false`, mock, 인증 생략은 사용하지 않았다.
+
+### 실제 plan 수량·독립 리뷰
+
+CLI: **6 add / 0 change / 0 destroy**. JSON actions 기준 별도 **replacement 0**.
+이는 S3 버킷6개가 아니라 상태 버킷1개와 보조설정5개다.
+
+| 주소 | 계획 |
+|---|---|
+| aws_s3_bucket.state | create — logstack-bucket, force_destroy=false, Project/Environment 태그 |
+| aws_s3_bucket_public_access_block.state | create — 공개 차단4개 true |
+| aws_s3_bucket_ownership_controls.state | create — BucketOwnerEnforced |
+| aws_s3_bucket_versioning.state | create — Enabled |
+| aws_s3_bucket_server_side_encryption_configuration.state | create — AES256(SSE-S3) |
+| aws_s3_bucket_policy.state | create — HTTPS 외 요청 Deny |
+
+bucket ARN/ID·도메인·최종 policy JSON 등은 apply 후 확정되는 unknown이다.
+정책은 현재 코드의 ARN 참조/DenyInsecureTransport와 대조해야 한다. 일부 KMS ID/MFA delete 등 provider computed 필드가
+unknown인 것을 새 KMS/MFA 리소스 생성으로 해석하지 않는다. prevent_destroy는 코드 lifecycle 보호로 별도 확인한다.
+NAT/VPC/Endpoint·EC2·ALB·DNS·시크릿·기존 DB 변경은 이 bootstrap plan에 없다.
+runtime plan 수량은 여전히 **미산출**이다.
+
+메인이 구현에 참여하지 않은 독립 reviewer에게 현재 저장 plan을 전달했다. 최종 코드·입력·lock·manifest SHA,
+plan에 동봉된 코드·actions·unknown·보존 정책과 아래 사람 apply 절차를 대조하고 **bootstrap plan 수용**으로 판정했다.
+이번 실제 plan 감사의 잔여 High0/Med0/Low0이며 이전 코드 감사0건을 재사용한 결과가 아니다.
+runtime plan 독립 리뷰는 여전히 NOT_RUN이다. 현재 중단점은 **사람의 bootstrap 최초 apply 대기**다.
+
+### 사람 실행 전용 — 독립 plan 리뷰 수용 후 최초 bootstrap apply
+
+아래 명령은 **에이전트 미실행**이다. 수용된 동일 plan인지 확인하고 사람이 직접 실행한다.
+작업 범위는 상태 버킷 준비뿐이며 runtime NAT/Endpoint/VPC 적용을 포함하지 않는다.
+
+```sh
+cd /Users/ljm/Desktop/logStack
+export AWS_PROFILE=logstack-t4
+export AWS_REGION=ap-northeast-2
+export AWS_DEFAULT_REGION=ap-northeast-2
+umask 077
+/Users/ljm/.local/share/aws-cli/aws sts get-caller-identity --profile logstack-t4 --region ap-northeast-2 --query Account --output text --no-cli-pager
+/Users/ljm/.local/share/terraform/1.14.9/terraform -chdir=infra/bootstrap workspace show
+shasum -a 256 infra/.terraform/t4-bootstrap-plan-20260909/bootstrap.tfplan
+# 위 계정324037288068·workspace default·plan SHA256과 독립 리뷰 수용을 확인한 사람만 실행:
+/Users/ljm/.local/share/terraform/1.14.9/terraform -chdir=infra/bootstrap apply /Users/ljm/Desktop/logStack/infra/.terraform/t4-bootstrap-plan-20260909/bootstrap.tfplan
+```
+
+저장 plan 적용은 추가 승인 질문 없이 실행될 수 있으므로 마지막 줄 전에 반드시 대조한다.
+인증 만료·이름 충돌·권한 오류·state 변경이 있으면 중단한다. 새 plan 없이 파일을 바꾸거나 강제 진행하지 않는다.
+최초 apply 후 실제 리소스 상태는 `/Users/ljm/Desktop/logStack/infra/bootstrap/terraform.tfstate`와 백업에 기록된다.
+현재는 이 리소스 state가 아직 없다. `.terraform/terraform.tfstate` backend 메타데이터와 혼동하지 않는다.
+사람은 새 state/backup을 접근 제한된 별도 안전 위치에 복사·보존하고 복구 가능성을 확인한다.
+Git ignore는 백업이 아니다. state 이동·원격 migration·state 삭제를 자동 수행하지 않는다.
+
+사람 완료 보고 후 실제 버킷 소유 계정·서울·공개 차단·버전관리·SSE-S3·TLS 정책과 operator 권한을 읽기 전용 확인한다.
+runtime backend.hcl은 그때 승인 bucket `logstack-bucket`, key `runtime/terraform.tfstate`, 서울,
+allowed_account_ids=[324037288068]를 사용한다. 준비·계정 gate 이후 runtime 정상 init/실제 plan·독립 리뷰로 재개한다.
+runtime state key와 `runtime/terraform.tfstate.tflock`에 필요한 정확한 권한은 README를 따른다.
+
+재개 프롬프트:
+
+> /Users/ljm/Desktop/logStack/infra/T4_STATUS.md §11과 infra/README.md·AGENTS 지침을 읽고 T4를 재개하라.
+> 신규bootstrap 저장 plan의 독립 리뷰/사람 apply 여부와 실제 bucket logstack-bucket을 먼저 확인하라.
+> 프로파일 logstack-t4·승인계정324037288068·서울·runtime key runtime/terraform.tfstate를 사용하고 기존 로컬 bootstrap state/lock을 보존하라.
+> 사람이 apply하지 않았다면 대신 실행하지 말고 그 지점에서 기다려라. 완료했다면 backend 메타데이터/권한 확인 후 runtime 정상 init/전체 실제 plan·독립 리뷰를 수행하라.
+> 임의 migration/import/state/force-unlock·apply/destroy·시크릿 조회·Git 조작·T3 소크·T5 리소스 추가는 금지다.
+
+이번 bootstrap plan은 AWS 적용 완료나 T4 전체 완료가 아니다. 상태 저장/요청 비용은 기존 §5 산식으로 별도이며
+runtime NAT/EIP/Endpoint의 시간 고정비는 이번 bootstrap만 적용한다고 발생하는 항목이 아니다. 가격 재조회·청구 실측은 하지 않았다.
+
+최종 Git 검증: `git diff --check`, `git diff --cached --check`, 범위 밖 `git diff --exit-code -- . ':!infra'` 모두 exit0.
+main/HEAD 유지, staged 없음, 기존 unstaged5개·untracked lock2개 상태를 보존했다. 이번 추가 추적 수정은 README/이 기록뿐이다.
+실제 tfvars·backend metadata·plan/JSON/증거는 ignored 로컬 파일이며 Git에 추가하지 않았다. .tf·provider/lock 의미 변경 없음.
+
+## 12. Bootstrap 사람 적용 인수와 실제 runtime plan (2026-09-09 KST)
+
+사람이 bootstrap apply 결과 `6 added, 0 changed, 0 destroyed`와 `arn:aws:s3:::logstack-bucket`을 보고했다.
+AI가 apply한 결과가 아니다. 아래 사후 AWS 조회와 실제 runtime plan을 구분한다.
+main/HEAD `bde9f071a1e6124cd664a6049e7b9dfade979df7`, 기존 unstaged5개·lockfile untracked2개를 보존했다.
+infra-developer 단일 작성/검증, 메인은 AWS 조회·독립 리뷰 조율. T5 코드·앱 테스트·서비스 제어·Git 조작은 하지 않았다.
+
+### Bootstrap·backend 사후 확인
+
+- 메인 읽기 전용 조회(승인 profile `logstack-t4`, 서울, expected-bucket-owner `324037288068`)는 모두 exit0:
+  STS 계정 일치; 버킷 ARN/서울; PublicAccessBlock4true; versioning Enabled; AES256(SSE-S3);
+  BucketOwnerEnforced; Project=logstack-demo/Environment=demo/Name=logstack-bucket;
+  버킷·하위 객체에 대한 `aws:SecureTransport=false` DenyInsecureTransport 정책.
+- runtime 정확 key prefix 조회의 명시적 한 페이지 결과는 KeyCount0/IsTruncated=false였다.
+  이전 자동 페이지 쿼리의 KeyCount null은 부재 근거로 사용하지 않았다. AccessDenied를 부재로 해석하지 않았다.
+- 실제 bootstrap 리소스 state는 `infra/bootstrap/terraform.tfstate`(9321bytes, 0600)로 존재한다.
+  시작 SHA256 `b20090b65ccef7a62a112db0282fd3d81016ab09661dc992456ae11984d7ef9a`를 보존했고
+  runtime plan 후에도 동일했다. 전체 내용 출력·복사·이전·migration·state 명령은 수행하지 않았다.
+  `.backup` 파일은 발견되지 않았으며 **별도 안전 백업 완료는 미확인**이다. 사람의 보존 작업이 남는다.
+- runtime init 전 backend metadata/실제 state/입력은 없고, 기존6.63.0 provider·lockfile만 있었다.
+  TF_WORKSPACE/TF_DATA_DIR/TF_CLI_ARGS/TF_LOG override는 unset이었다. bootstrap state를 runtime에 연결하지 않았다.
+- gate 후 ignored/0600의 `runtime/backend.hcl`·`terraform.tfvars`를 생성했다. 계정324037288068,
+  bucket logstack-bucket, key runtime/terraform.tfstate, 서울, a/c, 기존 태그 및 **s3_read_paths={}**만 입력했다.
+  상태 버킷 승인을 인스턴스의 패키지/백업 S3 접근 승인으로 확대하지 않았다.
+- 실제 초기화된 backend metadata에서 type=s3, 정확 bucket/key/region,
+  allowed_account_ids=[324037288068], encrypt=true, use_lockfile=true를 최소 필드만 대조했다.
+  workspace는 default다. 생성/전환·reconfigure·migration 없이 정상 S3 init했다.
+- Terraform core1.14.9의 S3 backend 인증과 AWS provider6.63.0의 실제 plan 인증이 각각 성공했다.
+  프로세스 범위 AWS_PROFILE=logstack-t4와 서울만 사용했으며 ~/.aws·credential_process·셸 설정 변경이나
+  자격증명 export/실제 시크릿 조회는 필요하지 않았고 실행하지 않았다.
+- 메인 plan 후 S3 metadata 조회 exit0: 현재 key prefix는 KeyCount0/IsTruncated=false로 state/현재 잠금 없음.
+  버전 목록에는 `runtime/terraform.tfstate.tflock`의239bytes 과거 버전(UTC18:39:42)과 최신 삭제 마커(18:39:44)가 있다.
+  정상 plan 잠금 생성/해제 시각과 일치하며 버전 관리 보존 결과다. 객체 본문 조회·수동 삭제·cleanup은 하지 않았다.
+  이 실행은 `.tflock`의 정상 쓰기/해제를 검증했지만 **runtime state 객체 PutObject 권한은 미검증**이다.
+  state 본문은 아직 없으며 이를 검증하려고 수동 PutObject나 불필요한 원격 state 쓰기를 수행하지 않는다.
+- 메인의 예정 IAM role/instance profile 이름3종씩 조회는 모두 NoSuchEntity(exit254)였다.
+  `logstack-demo-demo-{sender,receiver,db}`와 충돌하는 기존 동명 역할/프로파일을 이 조회에서 발견하지 못했다.
+
+### 검증·실제 저장 plan
+
+증거: `/Users/ljm/Desktop/logStack/infra/.terraform/t4-runtime-plan-20260909/` (0700, 파일0600, 기존 ignore 적용).
+실행 CLI `/Users/ljm/.local/share/terraform/1.14.9/terraform`. 기존 provider/lockfile 재사용, 설치/upgrade 반복 없음.
+
+| 명령(저장소 루트 기준) | 결과·종료 코드 | 증거 |
+|---|---|---|
+| bootstrap state/runtime code/lock hash | PASS, 0 | `00-bootstrap-state-code-lock-hashes.log` |
+| `-chdir=infra/runtime init -backend-config=backend.hcl -input=false` | PASS, 0; 실제 S3 backend | `01-runtime-init.log` |
+| `fmt -check -recursive infra` | PASS, 0 | `02-fmt-check.log` |
+| `-chdir=infra/runtime validate` | PASS, 0; 오류·경고 없음 | `03-runtime-validate.log` |
+| `-chdir=infra/runtime workspace show` | PASS, 0; default | `04-runtime-workspace.log` |
+| `-chdir=infra/runtime plan -input=false -detailed-exitcode -out=/Users/ljm/Desktop/logStack/infra/.terraform/t4-runtime-plan-20260909/runtime.tfplan` | **PASS, 2**; UTC18:39:43 완료, 오류·경고 없음 | `05-runtime-plan.log`, `runtime.tfplan` |
+| `-chdir=infra/runtime show -json <위 plan>` | PASS, 0 | `06-runtime-show.log`, `runtime-plan.json` |
+| 최종 state/code/input/backend/lock/plan/JSON hash | PASS, 0 | `07-plan-code-input-lock-hashes.log` |
+| 앱 회귀/e2e/T3 소크 | NOT_RUN (이번 단계) | 의미 코드 변경 없음, 기존 검증 증거 보존 |
+| AI apply/destroy/test/import/state/force-unlock·CLI/SDK 우회 생성 | NOT_RUN | runtime AWS 적용하지 않음 |
+
+실제 S3 backend의 정상 잠금을 사용한 전체 일반 plan이다. lock 비활성화·target·refresh 생략·mock·임시 local backend를 사용하지 않았다.
+성공한 plan은 모든 apply 권한·AWS 실제 연결·SSM 운영·비용 상한까지 검증한 것이 아니다.
+plan SHA256 `90cc748a946708c986792a4a87e6a4faf7c5f77f1e8e18d9505cec80a884a28a`.
+JSON SHA256 `b4909976a20f5d3c5f36b8c6d1af5f162d0bc21e947b9d60426709128a56bb99`.
+
+CLI **60 add / 0 change / 0 destroy**, JSON 별도 **replacement 0**:
+
+| 종류 | 계획 수량 |
+|---|---:|
+| VPC / subnet | 1 / 6 |
+| IGW / public NAT / EIP | 각1 |
+| Route table / association / 명시 route | 5 / 6 / 3 |
+| 서비스·관리 SG / AWS 기본 SG 규칙 제거 관리 | 6 / 1 |
+| SG ingress / egress 개별 규칙 | 7 / 9 |
+| Interface Endpoint / S3 Gateway Endpoint | 3(각2AZ) / 1 |
+| IAM role / instance profile / 관리 inline policy | 각3 |
+
+기존 bootstrap 버킷·DB·EC2·ALB·DNS·시크릿은 이 runtime plan에 없다.
+VPC/SG/서브넷/Endpoint ID 및 이를 참조하는 정책 ARN 등 unknown은 현재 코드와 plan 동봉 코드를 함께 검토한다.
+기본 SG 관리1개는 새 서비스 SG 추가가 아니라 새 VPC의 AWS 기본 허용 규칙을 비우는 관리 항목이다.
+Interface3×2AZ는 유료 Endpoint-AZ6이며 S3 Gateway를 유료 Interface로 합산하지 않는다.
+
+### 독립 리뷰·중단점
+
+메인이 실제 저장 plan·JSON·현재 코드·입력·lock·해시를 독립 reviewer에게 전달했다.
+reviewer는 plan 동봉 코드·60개 actions·unknown·입력·provider/lock·SHA 및 문서를 대조하고 최종 수용했다.
+TEARDOWN의 과거 상태 문장 불일치 Low1은 첫 문단 정정 후 재검토로 해소됐다. 최종 잔여 **High0/Med0/Low0**다.
+이전 bootstrap plan/코드 감사 결과를 이번 runtime plan 감사 결과로 재사용하지 않았다.
+**양 root validate와 해당 실제 plan 독립 리뷰가 수용되어 T4 구현·검증 완료**로 판정한다.
+이는 **runtime 미배포 / 사람의 적용 결정 대기** 상태다. AI runtime apply·T5 자동 착수는 하지 않는다.
+SSM 연결·패키지 공급·로그·시크릿 주입·백업/복구·15분 재현의 AWS 운영 실측은 미완료이며 bootstrap 별도 state 백업도 미확인이다.
+
+S3/Logs 기본 차단, Session Manager preferences/KMS 요구, AMI 공급·백업·로그·시크릿 최소 권한은 §10의 기능별 인계를 유지한다.
+이 경로들은 네트워크 plan 성공만으로 운영 준비 완료가 되지 않으며 미확정 버킷/로그그룹을 광범위 Allow로 바꾸지 않았다.
+이후 runtime 적용 시 NAT/EIP/Endpoint 유지 과금이 시작된다. 서울 기준 §5의48/72시간 고정비 $6.816/$10.224는
+변동량·잔존 상태 S3 비용·세금 등을 제외한 과거 확인 단가 산식이며 이번 가격 재조회/청구 실측은 없다.
+
+### 다음 작업
+
+1. 사람이 bootstrap 로컬 state의 별도 안전 백업·복구 가능성을 확인한다. 에이전트가 자동 복사/이전하지 않는다.
+2. 독립 리뷰 수용된 동일 runtime plan의 계정·backend/key·default workspace·SHA와 생성60/삭제0/교체0을 사람이 대조한다.
+   적용 시점·48/72시간 유지 비용·종료 책임자를 정한다. AI가 apply하지 않는다.
+3. 코드/입력/provider/state가 의미 있게 바뀌면 새 plan·독립 리뷰가 필요하다. 오래된 저장 plan을 임의 적용하지 않는다.
+4. 사람 runtime 적용 후에만 실제 subnet/route/SG/Endpoint·SSM 연결을 확인한다. T5 착수는 별도 단계다.
+
+재개 프롬프트:
+
+> 현재 /Users/ljm/Desktop/logStack/infra/T4_STATUS.md §12와 README/AGENTS 지침을 읽고 T4 인계를 이어라.
+> bootstrap 사람 적용·로컬state를 보존하고 runtime 저장plan의 독립검토/사람적용 여부를 먼저 확인하라.
+> 승인계정324037288068/profilelogstack-t4/서울/backendlogstack-bucket/runtime/terraform.tfstate/defaultworkspace를 유지하라.
+> 미적용이면 AI가 대신apply하지 말라. 코드·입력·provider·state가 바뀌었으면 일반실제plan과독립리뷰를 갱신하라.
+> state이전/import/force-unlock·시크릿실제값조회·Git조작·앱/DB/서비스변경·T5자동착수는 금지다.
+
+최종 변경 범위: 이번 추가 tracked 수정은 infra/README.md·T4_STATUS.md와 승인된 TEARDOWN 첫 상태 문단이다.
+기존 runtime fmt3파일·lock2개를 보존했다. 초기 runtime code/lock/bootstrap state11개와 이전 tf/lock16개 hash가 현재와 모두 일치했다.
+git diff --check/cached --check/범위 밖 diff --exit-code는 모두0. main/HEAD 유지, staged없음, unstaged6개·untracked lock2개.
+plan/JSON/실제입력/backend metadata/로그는 ignored 로컬 결과다. 원래 state·T3 증거·서비스는 변경·정리하지 않았다.

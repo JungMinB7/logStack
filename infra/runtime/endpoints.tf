@@ -1,21 +1,21 @@
 locals {
   role_arns = [for role in aws_iam_role.ec2 : role.arn]
   deny_all = jsonencode({
-    Version = "2012-10-17"
+    Version   = "2012-10-17"
     Statement = [{ Effect = "Deny", Principal = "*", Action = "*", Resource = "*" }]
   })
   interface_policies = {
     ssm = jsonencode({
       Version = "2012-10-17"
       Statement = [{
-        Effect = "Allow", Principal = "*", Action = local.ssm_actions, Resource = "*"
+        Effect    = "Allow", Principal = "*", Action = local.ssm_actions, Resource = "*"
         Condition = { ArnEquals = { "aws:PrincipalArn" = local.role_arns } }
       }]
     })
     ssmmessages = jsonencode({
       Version = "2012-10-17"
       Statement = [{
-        Effect = "Allow", Principal = "*", Action = local.channel_actions, Resource = "*"
+        Effect    = "Allow", Principal = "*", Action = local.channel_actions, Resource = "*"
         Condition = { ArnEquals = { "aws:PrincipalArn" = local.role_arns } }
       }]
     })
