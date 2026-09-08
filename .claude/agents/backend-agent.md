@@ -16,7 +16,7 @@ tools: Read, Grep, Glob, Write, Edit, Bash
 
 ## 구현 규칙
 - Controller → Service → Repository 3층 구조 (design.md §11).
-  Controller는 Prisma를 모른다. SQL과 Prisma 호출은 *.repository.ts에만 둔다.
+  Controller는 ORM을 모른다. SQL과 ORM 호출은 *.repository.ts에만 둔다.
   Service는 Express Request/Response 객체를 모른다.
 - 적재 트랜잭션은 design.md §6.2의 3단계 순서를 정확히 따른다:
   ① 원본 INSERT ... ON CONFLICT (event_id) DO NOTHING + RETURNING으로 삽입된 집합 확보
@@ -30,7 +30,9 @@ tools: Read, Grep, Glob, Write, Edit, Bash
   - 리텐션 최초 로그인은 전체 이력 MIN, Dn 판정은 end 밖 데이터도 조회,
     matured는 현재 UTC 일자 > 코호트+n일 때만 true
   - zero-fill: 요청 기간의 모든 달력 일자를 행으로 반환
-- BigInt(user_id, amount_minor)는 JSON 직렬화 전 반드시 문자열/Number로 변환한다.
+- BIGINT 컬럼(user_id, amount_minor)은 TypeORM(pg)이 문자열로 반환한다.
+  집계 SQL은 ::int/::text 캐스팅으로 반환 타입을 통제하고,
+  JSON 응답에는 계약대로 문자열/Number만 사용한다 (JS BigInt 직렬화 불가).
 - 금액 연산에 부동소수점을 쓰지 않는다. arpu는 문자열 연산 또는 정수 연산 후
   소수 2자리 반올림 문자열로 만든다.
 - payload는 unknown으로 받고 shop_purchase만 필드 단위 검증한다 (design.md §8.1).

@@ -273,7 +273,7 @@ export class MetricsService {
   }
 }
 
-/** Prisma가 DATE 컬럼으로 돌려주는 Date(UTC 자정)를 YYYY-MM-DD로 (AI_RULES 15) */
+/** DATE 컬럼의 Date(UTC 자정 — data-source.ts의 pg 파서 설정)를 YYYY-MM-DD로 (AI_RULES 15) */
 function toDateString(day: Date): string {
   return day.toISOString().slice(0, 10);
 }

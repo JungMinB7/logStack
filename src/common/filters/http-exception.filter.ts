@@ -37,24 +37,57 @@ const MESSAGE_BY_STATUS: Record<number, string> = {
   [HttpStatus.SERVICE_UNAVAILABLE]: 'temporary storage failure, retry later',
 };
 
+/** 소켓 수준 연결 실패 코드 — DB 프로세스 다운·네트워크 단절류 */
+const RETRYABLE_SOCKET_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+]);
+
 /**
- * 재시도 가능한 저장소 오류인지 판별 (Prisma 오류 코드 duck-typing —
- * Prisma 타입을 repository 밖으로 가져오지 않기 위해 코드 문자열만 본다).
- * - P2028: 트랜잭션 만료(interactive transaction timeout)·커넥션 획득 실패
- * - P1001/P1002: DB 서버 접속 불가·타임아웃
+ * 재시도 가능한 저장소 오류인지 판별 (오류 코드 duck-typing —
+ * ORM 타입을 repository 밖으로 가져오지 않기 위해 코드 문자열만 본다).
+ *
+ * TypeORM/pg 세계의 재시도 가능 오류 (ADR-005 전환 후 실제 발생 경로):
+ * - PG 57014 (query_canceled): statement_timeout 5초·트랜잭션 예산 8초 초과 —
+ *   구 Prisma P2028(트랜잭션 만료)의 등가물. QueryFailedError는 driverError의
+ *   속성을 자신에게 복사하므로 code/driverError.code 양쪽을 본다
+ * - PG 08xxx (connection_exception 클래스): 연결 예외
+ * - ECONNREFUSED 등 소켓 오류: DB 서버 접속 불가 (구 P1001/P1002 등가물)
+ * - 커넥션 풀 획득 timeout (pg: "timeout exceeded when trying to connect")
+ *
+ * 구 Prisma 코드(P2028/P1001/P1002) 판별은 하위 호환으로 유지한다
+ * (이 매핑을 잠근 기존 단위 테스트가 무수정 원칙의 대상이기 때문).
  * 이들은 클라이언트가 재시도하면 성공할 수 있으므로 500이 아니라
  * 503 STORAGE_UNAVAILABLE로 응답한다 (design.md §5.5, §6.4).
  */
 export function isRetryableStorageError(exception: unknown): boolean {
   if (typeof exception !== 'object' || exception === null) return false;
-  const candidate = exception as { code?: unknown; errorCode?: unknown };
-  const code =
-    typeof candidate.code === 'string'
-      ? candidate.code
-      : typeof candidate.errorCode === 'string'
-        ? candidate.errorCode
-        : undefined;
-  return code === 'P2028' || code === 'P1001' || code === 'P1002';
+  const candidate = exception as {
+    code?: unknown;
+    errorCode?: unknown;
+    message?: unknown;
+    driverError?: { code?: unknown } | null;
+  };
+  const codes = [
+    candidate.code,
+    candidate.errorCode,
+    candidate.driverError?.code,
+  ].filter((value): value is string => typeof value === 'string');
+
+  for (const code of codes) {
+    if (code === '57014') return true; // query_canceled (statement_timeout)
+    if (code.startsWith('08')) return true; // connection_exception 클래스
+    if (RETRYABLE_SOCKET_CODES.has(code)) return true;
+    if (code === 'P2028' || code === 'P1001' || code === 'P1002') return true;
+  }
+  // pg-pool 커넥션 획득 timeout은 코드 없이 메시지로만 구분된다
+  return (
+    typeof candidate.message === 'string' &&
+    candidate.message.includes('timeout exceeded when trying to connect')
+  );
 }
 
 @Catch()

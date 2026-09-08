@@ -1,37 +1,73 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import {
+  STATEMENT_TIMEOUT_MS,
+  TRANSACTION_TIMEOUT_MS,
+} from '../database/data-source';
 
-/** 트랜잭션 안팎 어디서든 실행할 수 있도록 쿼리 메서드가 받는 클라이언트 타입 */
-type Db = Prisma.TransactionClient;
+/**
+ * 트랜잭션 안팎 어디서든 실행할 수 있도록 쿼리 메서드가 받는 클라이언트 타입.
+ * (구 Prisma.TransactionClient 대체 — $queryRawUnsafe는 기존 E2E 테스트가
+ * 스냅샷 트랜잭션 클라이언트에 직접 SQL을 흘리는 seam이라 이름을 유지한다)
+ */
+export interface Db {
+  query<T>(sql: string, params?: unknown[]): Promise<T>;
+  $queryRawUnsafe<T = unknown>(sql: string): Promise<T>;
+}
 
 /**
  * 지표 집계 SQL 전담 (AI_RULES 13 — SQL은 *.repository.ts에만).
  *
  * 공통 규칙:
+ * - 집계 SQL은 Prisma 시절의 raw 문자열을 $n 파라미터로 그대로 이식했다
+ *   (ADR-005 — QueryBuilder 재작성 금지)
  * - 모든 기간은 반개구간 [start 00:00 UTC, end+1일 00:00 UTC) — AI_RULES 20.
- *   `$d::timestamp AT TIME ZONE 'UTC'`로 세션 시간대와 무관하게 UTC 자정을 만든다
+ *   `$n::timestamp AT TIME ZONE 'UTC'`로 세션 시간대와 무관하게 UTC 자정을 만든다
  * - 일자 귀속은 (occurred_at AT TIME ZONE 'UTC')::date — occurred_at 기준 (AI_RULES 2)
  * - zero-fill은 generate_series로 달력 일자를 만들어 LEFT JOIN (AI_RULES 23)
- * - COUNT는 ::int 캐스팅으로 BigInt 반환을 차단 (AI_RULES 15)
+ * - COUNT는 ::int 캐스팅 — pg는 bigint를 문자열로 반환하므로 int로 통제 (AI_RULES 15)
  * - data와 summary를 병기하는 지표(dau/revenue/conversion)는 *WithSummary 메서드가
  *   REPEATABLE READ 트랜잭션으로 묶어 한 응답이 단일 DB 스냅샷을 보게 한다
  *   (Codex 회귀: 두 쿼리 사이의 동시 커밋으로 data·summary가 어긋나는 문제)
  */
 @Injectable()
 export class MetricsRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  /** 트랜잭션 밖 단발 쿼리용 기본 클라이언트 (statement_timeout 5초는 연결 옵션) */
+  private readonly db: Db;
+
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+  ) {
+    this.db = {
+      query: (sql, params) => this.dataSource.query(sql, params as unknown[]),
+      $queryRawUnsafe: (sql) => this.dataSource.query(sql),
+    };
+  }
 
   /**
    * 읽기 전용 스냅샷 트랜잭션 — data·summary 쿼리 묶음용.
-   * timeout 8초는 design.md §6.4의 8초 체계(적재 트랜잭션과 동일)와 정합.
-   * 만료(P2028) 시 전역 필터가 503 STORAGE_UNAVAILABLE로 매핑한다.
+   * 전체 상한 8초는 design.md §6.4의 8초 체계(적재 트랜잭션과 동일)와 정합:
+   * 각 문장 직전에 남은 예산(≤5초)으로 SET LOCAL statement_timeout을 갱신해
+   * 초과 시 PG가 57014(query_canceled)로 중단·롤백하고,
+   * 전역 필터가 503 STORAGE_UNAVAILABLE로 매핑한다.
    */
   private snapshot<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
-    return this.prisma.$transaction(fn, {
-      isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
-      maxWait: 5_000,
-      timeout: 8_000,
+    return this.dataSource.transaction('REPEATABLE READ', async (manager) => {
+      const deadline = Date.now() + TRANSACTION_TIMEOUT_MS;
+      const exec = async <R>(sql: string, params?: unknown[]): Promise<R> => {
+        const budget = Math.max(
+          1,
+          Math.min(deadline - Date.now(), STATEMENT_TIMEOUT_MS),
+        );
+        await manager.query(`SET LOCAL statement_timeout = '${budget}ms'`);
+        return manager.query<R>(sql, params as unknown[]);
+      };
+      const tx: Db = {
+        query: exec,
+        $queryRawUnsafe: (sql) => exec(sql),
+      };
+      return fn(tx);
     });
   }
 
@@ -90,12 +126,13 @@ export class MetricsRepository {
   async dauByDay(
     start: string,
     end: string,
-    db: Db = this.prisma,
+    db: Db = this.db,
   ): Promise<Array<{ day: Date; dau: number }>> {
-    return db.$queryRaw<Array<{ day: Date; dau: number }>>(Prisma.sql`
+    return db.query<Array<{ day: Date; dau: number }>>(
+      `
       WITH days AS (
         -- zero-fill 기준이 되는 달력 일자 (start ~ end, 양 끝 포함)
-        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+        SELECT generate_series($1::date, $2::date, interval '1 day')::date AS day
       ),
       daily_logins AS (
         -- §9.1: 하루 여러 번 로그인해도 1명 (DISTINCT day, user_id)
@@ -103,15 +140,17 @@ export class MetricsRepository {
         SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day, user_id
         FROM game_events
         WHERE event_type = 'session_login'
-          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+          AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
       )
       SELECT d.day AS day, COUNT(l.user_id)::int AS dau
       FROM days d
       LEFT JOIN daily_logins l ON l.day = d.day
       GROUP BY d.day
       ORDER BY d.day ASC
-    `);
+    `,
+      [start, end],
+    );
   }
 
   /**
@@ -121,16 +160,17 @@ export class MetricsRepository {
   async uniqueLoginUsers(
     start: string,
     end: string,
-    db: Db = this.prisma,
+    db: Db = this.db,
   ): Promise<number> {
-    const rows = await db.$queryRaw<Array<{ unique_users: number }>>(
-      Prisma.sql`
+    const rows = await db.query<Array<{ unique_users: number }>>(
+      `
         SELECT COUNT(DISTINCT user_id)::int AS unique_users
         FROM game_events
         WHERE event_type = 'session_login'
-          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+          AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
       `,
+      [start, end],
     );
     return rows[0]?.unique_users ?? 0;
   }
@@ -151,10 +191,11 @@ export class MetricsRepository {
       returned_d30: number;
     }>
   > {
-    return this.prisma.$queryRaw(Prisma.sql`
+    return this.db.query(
+      `
       WITH days AS (
         -- zero-fill: 신규 유저가 없는 코호트 일자도 행으로 반환 (§10.3)
-        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+        SELECT generate_series($1::date, $2::date, interval '1 day')::date AS day
       ),
       first_login AS (
         -- §9.2 계산 순서 1: 최초 로그인은 조회 범위 필터 없이
@@ -170,8 +211,8 @@ export class MetricsRepository {
         -- (start/end는 코호트 일자를 필터하는 파라미터)
         SELECT user_id, (first_at AT TIME ZONE 'UTC')::date AS cohort_date
         FROM first_login
-        WHERE first_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND first_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+        WHERE first_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND first_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
       ),
       login_days AS (
         -- §9.2 계산 순서 3: Dn 판정용 로그인 일자 집합.
@@ -205,7 +246,9 @@ export class MetricsRepository {
       FROM days d
       LEFT JOIN per_cohort p ON p.cohort_date = d.day
       ORDER BY d.day ASC
-    `);
+    `,
+      [start, end],
+    );
   }
 
   /**
@@ -220,11 +263,12 @@ export class MetricsRepository {
     start: string,
     end: string,
     currency: string,
-    db: Db = this.prisma,
+    db: Db = this.db,
   ): Promise<Array<{ day: Date; revenue_minor: string; active_users: number }>> {
-    return db.$queryRaw(Prisma.sql`
+    return db.query(
+      `
       WITH days AS (
-        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+        SELECT generate_series($1::date, $2::date, interval '1 day')::date AS day
       ),
       daily_active AS (
         -- §9.1: 일별 활성 유저 (ARPU 분모 — ARPPU 아님, AI_RULES 7)
@@ -232,8 +276,8 @@ export class MetricsRepository {
                COUNT(DISTINCT user_id)::int AS active_users
         FROM game_events
         WHERE event_type = 'session_login'
-          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+          AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
         GROUP BY 1
       ),
       daily_revenue AS (
@@ -241,9 +285,9 @@ export class MetricsRepository {
         SELECT (occurred_at AT TIME ZONE 'UTC')::date AS day,
                SUM(amount_minor) AS revenue_minor
         FROM purchases
-        WHERE currency = ${currency}
-          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+        WHERE currency = $3
+          AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
         GROUP BY 1
       )
       SELECT d.day AS day,
@@ -253,7 +297,9 @@ export class MetricsRepository {
       LEFT JOIN daily_revenue r ON r.day = d.day
       LEFT JOIN daily_active a  ON a.day = d.day
       ORDER BY d.day ASC
-    `);
+    `,
+      [start, end, currency],
+    );
   }
 
   /**
@@ -264,17 +310,18 @@ export class MetricsRepository {
     start: string,
     end: string,
     currency: string,
-    db: Db = this.prisma,
+    db: Db = this.db,
   ): Promise<string> {
-    const rows = await db.$queryRaw<
-      Array<{ revenue_minor: string }>
-    >(Prisma.sql`
+    const rows = await db.query<Array<{ revenue_minor: string }>>(
+      `
       SELECT COALESCE(SUM(amount_minor), 0)::text AS revenue_minor
       FROM purchases
-      WHERE currency = ${currency}
-        AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-        AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
-    `);
+      WHERE currency = $3
+        AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+        AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
+    `,
+      [start, end, currency],
+    );
     return rows[0]?.revenue_minor ?? '0';
   }
 
@@ -287,25 +334,26 @@ export class MetricsRepository {
   async conversionByDay(
     start: string,
     end: string,
-    db: Db = this.prisma,
+    db: Db = this.db,
   ): Promise<Array<{ day: Date; paying_users: number; active_users: number }>> {
-    return db.$queryRaw(Prisma.sql`
+    return db.query(
+      `
       WITH days AS (
-        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+        SELECT generate_series($1::date, $2::date, interval '1 day')::date AS day
       ),
       daily_active AS (
         SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day, user_id
         FROM game_events
         WHERE event_type = 'session_login'
-          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+          AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
       ),
       daily_paying AS (
         -- amount_minor 조건 없음: 0원 결제(무료 프로모션)도 PU 포함 [A-29]
         SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day, user_id
         FROM purchases
-        WHERE occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+        WHERE occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
       ),
       counts AS (
         -- 분자 = 활성 유저 집합과의 교집합 (활성 유저 기준 LEFT JOIN이므로
@@ -323,7 +371,9 @@ export class MetricsRepository {
       FROM days d
       LEFT JOIN counts c ON c.day = d.day
       ORDER BY d.day ASC
-    `);
+    `,
+      [start, end],
+    );
   }
 
   /**
@@ -333,31 +383,34 @@ export class MetricsRepository {
   async conversionTotals(
     start: string,
     end: string,
-    db: Db = this.prisma,
+    db: Db = this.db,
   ): Promise<{ paying_users: number; active_users: number }> {
-    const rows = await db.$queryRaw<
+    const rows = await db.query<
       Array<{ paying_users: number; active_users: number }>
-    >(Prisma.sql`
+    >(
+      `
       SELECT
         (SELECT COUNT(DISTINCT user_id)::int
          FROM game_events
          WHERE event_type = 'session_login'
-           AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-           AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+           AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+           AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
         ) AS active_users,
         (SELECT COUNT(DISTINCT p.user_id)::int
          FROM purchases p
-         WHERE p.occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-           AND p.occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+         WHERE p.occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+           AND p.occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
            AND EXISTS (
              SELECT 1 FROM game_events g
              WHERE g.event_type = 'session_login'
                AND g.user_id = p.user_id
-               AND g.occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-               AND g.occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+               AND g.occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+               AND g.occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
            )
         ) AS paying_users
-    `);
+    `,
+      [start, end],
+    );
     return rows[0] ?? { paying_users: 0, active_users: 0 };
   }
 
@@ -375,21 +428,27 @@ export class MetricsRepository {
   ): Promise<
     Array<{ day: Date; event_type: string; engaged_users: number; dau: number }>
   > {
-    return this.prisma.$queryRaw(Prisma.sql`
+    // event_type 목록은 개수가 가변이라 $3부터 순번 placeholder로 전개한다
+    // (구 Prisma.join과 동일한 ", " 결합 — SQL 본문은 그대로)
+    const typePlaceholders = eventTypes
+      .map((_, i) => `$${i + 3}`)
+      .join(', ');
+    return this.db.query(
+      `
       WITH days AS (
-        SELECT generate_series(${start}::date, ${end}::date, interval '1 day')::date AS day
+        SELECT generate_series($1::date, $2::date, interval '1 day')::date AS day
       ),
       types AS (
         -- zero-fill의 두 번째 축: 요청된 event_type 목록 (생략 시 13개 전체)
-        SELECT unnest(ARRAY[${Prisma.join(eventTypes)}])::varchar AS event_type
+        SELECT unnest(ARRAY[${typePlaceholders}])::varchar AS event_type
       ),
       daily_active AS (
         -- §9.1: 해당 일자 DAU 집합 (분모이자 교집합의 기준 집합)
         SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day, user_id
         FROM game_events
         WHERE event_type = 'session_login'
-          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+          AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
       ),
       daily_dau AS (
         SELECT day, COUNT(*)::int AS dau FROM daily_active GROUP BY day
@@ -399,9 +458,9 @@ export class MetricsRepository {
         SELECT DISTINCT (occurred_at AT TIME ZONE 'UTC')::date AS day,
                event_type, user_id
         FROM game_events
-        WHERE event_type IN (${Prisma.join(eventTypes)})
-          AND occurred_at >= ${start}::timestamp AT TIME ZONE 'UTC'
-          AND occurred_at < ((${end}::date + 1)::timestamp AT TIME ZONE 'UTC')
+        WHERE event_type IN (${typePlaceholders})
+          AND occurred_at >= $1::timestamp AT TIME ZONE 'UTC'
+          AND occurred_at < (($2::date + 1)::timestamp AT TIME ZONE 'UTC')
       ),
       counts AS (
         -- 분자 = 발생 유저 ∩ DAU 집합 (INNER JOIN = 교집합)
@@ -419,6 +478,8 @@ export class MetricsRepository {
       LEFT JOIN counts c ON c.day = d.day AND c.event_type = t.event_type
       LEFT JOIN daily_dau u ON u.day = d.day
       ORDER BY d.day ASC, t.event_type ASC
-    `);
+    `,
+      [start, end, ...eventTypes],
+    );
   }
 }

@@ -7,16 +7,16 @@ import { validateEnv } from './common/env.validation';
 import { HttpErrorFilter } from './common/filters/http-exception.filter';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 import { firstConstraintMessage } from './common/validation.util';
+import { DatabaseModule } from './database/database.module';
 import { IngestionModule } from './ingestion/ingestion.module';
 import { MetricsModule } from './metrics/metrics.module';
-import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
   imports: [
     // fail-closed: 필수 키(INGEST_API_KEY, INGEST_INSTANCE_ID, ADMIN_API_KEY)
     // 미설정 시 부팅 실패 (src/common/env.validation.ts)
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
-    PrismaModule,
+    DatabaseModule,
     AuthModule,
     CommonModule,
     IngestionModule,

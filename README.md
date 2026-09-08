@@ -4,8 +4,8 @@
 **유실 없이** 적재하고(event_id 멱등성), 운영 지표 5종(DAU·리텐션·매출/ARPU·결제
 전환율·활동별 참여율)을 조회하는 서버.
 
-- **기술 스택**: Node.js 24 · TypeScript · NestJS 11 (Express) · Prisma 6 · PostgreSQL 16 · Jest/Supertest · Docker Compose
-- **구조**: Controller → Service → Repository 3층 (ADR-002 — Prisma/SQL은 `*.repository.ts`에만)
+- **기술 스택**: Node.js 24 · TypeScript · NestJS 11 (Express) · TypeORM · PostgreSQL 16 · Jest/Supertest · Docker Compose
+- **구조**: Controller → Service → Repository 3층 (ADR-002 — ORM/SQL은 `*.repository.ts`에만)
 
 | 문서 | 내용 |
 |---|---|
@@ -25,7 +25,7 @@ docker compose up -d --build        # PostgreSQL 16 + 앱 빌드·기동
 curl http://localhost:3000/health   # {"status":"ok"} 확인
 ```
 
-앱 컨테이너가 기동 시 `prisma migrate deploy`로 마이그레이션을 자동 적용한다.
+앱 컨테이너가 기동 시 `typeorm migration:run`으로 마이그레이션을 자동 적용한다.
 로컬 개발(핫 리로드)은 `docker compose up -d db` 후 `npm install && npm run start:dev`.
 `GET /health`는 컨테이너 liveness 확인용 운영 편의 엔드포인트로, API 계약
 (docs/api.openapi.yaml) 밖이며 인증이 없다.
@@ -46,14 +46,14 @@ curl http://localhost:3000/health   # {"status":"ok"} 확인
 ## 3. 마이그레이션·시드
 
 ```bash
-npm run prisma:migrate       # prisma migrate deploy (컨테이너는 자동 실행)
-npm run prisma:migrate:dev   # 로컬 개발용 (스키마 변경 시)
+npm run migration:run        # typeorm migration:run (컨테이너는 자동 실행)
+npm run migration:revert     # 마지막 마이그레이션 되돌리기 (로컬 개발용)
 npm run seed                 # 고정 데이터셋 12건을 "적재 API 경유"로 투입
 ```
 
 seed는 DB에 직접 INSERT하지 않고 적재 API를 경유한다 — seed 자체가 인증·검증·
 멱등성 트랜잭션의 동작 검증을 겸한다. purchases의 CHECK 제약(quantity ≥ 1,
-amount_minor ≥ 0)은 Prisma 스키마가 표현하지 못해 마이그레이션 SQL에 직접 기술했다.
+amount_minor ≥ 0)은 엔티티가 표현하지 못해 마이그레이션 raw SQL에 직접 기술했다.
 
 ## 4. 적재 API 호출 예시
 
@@ -289,12 +289,14 @@ instance_id로 시뮬레이션**된다 (전송 패턴만 재현).
   signed BIGINT를 넘을 수 있어 십진 문자열로 반환, ARPU는 BigInt 정수 연산으로
   소수 2자리 반올림 (부동소수점 미사용)
 - **data·summary 단일 스냅샷**: 두 쿼리 사이의 동시 커밋으로 한 응답 안의
-  값이 어긋나지 않도록 REPEATABLE READ 트랜잭션으로 묶음. P2028 등 재시도
-  가능 오류는 503으로 매핑
+  값이 어긋나지 않도록 REPEATABLE READ 트랜잭션으로 묶음. statement_timeout
+  초과(PG 57014)·연결 실패 등 재시도 가능 오류는 503으로 매핑
 - **`occurred_at` 시간대 지정자 필수**: 오프셋 없는 ISO8601은 DB 세션 시간대에
   따라 해석이 흔들리므로 rejected 처리 (계약 "ISO8601 UTC"의 강제)
 - **fail-closed 환경변수 검증**: 필수 키 누락·공백·적재/관리자 키 동일 시 부팅 거부
-- **Prisma ^6 고정**: 7.x가 존재하나 제출 안정성을 위해 검증된 6.x 유지
+- **TypeORM 전환 (ADR-005)**: 저장 계층을 Prisma에서 TypeORM으로 교체하되
+  집계 SQL·`ON CONFLICT ... RETURNING`은 raw 문자열 그대로 유지, 기존 e2e 45개
+  무수정 green으로 동작 동일성 검증 (`synchronize: false`, 스키마는 마이그레이션 SQL이 원천)
 - **event_type은 PG enum이 아닌 VARCHAR + DTO 허용 목록** (design.md §7.4 — 새
   타입 추가에 마이그레이션 불필요)
 

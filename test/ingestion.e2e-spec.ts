@@ -16,7 +16,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/app.setup';
-import { PrismaService } from '../src/prisma/prisma.service';
+import { DatabaseService } from '../src/database/database.service';
 
 const API_KEY = 'test-ingest-key';
 const INSTANCE_ID = '0fab3f2e-1894-41cd-b915-f99440a3ff32';
@@ -98,7 +98,7 @@ function assertInvariants(body: BatchResponseBody): void {
 
 describe('Ingestion API (e2e)', () => {
   let app: INestApplication<App>;
-  let prisma: PrismaService;
+  let prisma: DatabaseService;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -108,7 +108,7 @@ describe('Ingestion API (e2e)', () => {
     app = moduleRef.createNestApplication({ bodyParser: false });
     configureApp(app);
     await app.init();
-    prisma = app.get(PrismaService);
+    prisma = app.get(DatabaseService);
   });
 
   afterAll(async () => {

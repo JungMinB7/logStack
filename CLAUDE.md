@@ -11,7 +11,7 @@
 Controller → Service → Repository 3층 구조.
 - Controller: HTTP 요청/응답 변환만
 - Service: 업무 규칙, 검증, 지표 정의
-- Repository: Prisma/SQL 전담
+- Repository: ORM(TypeORM)·SQL 전담
 Port/Adapter, Domain Entity 분리 같은 클린 아키텍처 패턴을 도입하지 않는다.
 (docs/decisions.md의 ADR-002 참조 — 의도된 결정임)
 

@@ -34,14 +34,16 @@
 11. start > end 같은 잘못된 파라미터는 400과 통일된 에러 형식으로 응답한다.
 
 ## 구조 규칙 (3층 아키텍처) — 이 프로젝트의 핵심 구조 규칙
-12. Controller는 Prisma를 직접 호출하지 않는다. Service만 호출한다.
-13. SQL(raw query 포함)과 Prisma 호출은 *.repository.ts 파일에만 존재한다.
+12. Controller는 ORM을 직접 호출하지 않는다. Service만 호출한다.
+13. SQL(raw query 포함)과 ORM 호출은 *.repository.ts 파일에만 존재한다.
 14. Service는 Express의 Request/Response 객체를 모른다.
     (HTTP 관심사는 Controller, 업무 규칙은 Service, DB는 Repository)
 
 ## TypeScript 함정 방지
-15. Prisma의 BIGINT 컬럼은 JS BigInt로 반환되며 JSON.stringify가 실패한다.
-    API 응답 직전에 반드시 Number 또는 문자열로 변환한다.
+15. TypeORM(pg 드라이버)은 BIGINT 컬럼·집계를 문자열로 반환한다. 집계 SQL은
+    ::int/::text 캐스팅으로 반환 타입을 통제하고, 금액 연산은 부동소수점 없이
+    BigInt 정수 연산으로 수행한 뒤 API 응답에는 문자열 또는 Number로 변환한다
+    (JS BigInt는 JSON.stringify가 실패한다).
 16. payload는 any가 아니라 unknown으로 받고, 런타임 검증(class-validator) 후 사용한다.
 
 ## 의존성 규칙

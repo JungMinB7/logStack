@@ -641,9 +641,9 @@ GET /api/v1/metrics/engagement?start=2026-01-01&end=2026-01-07&event_type=boss_c
 
 Controller → Service → Repository 3층 구조 (ADR-002).
 
-- Controller: HTTP 요청/응답 변환, DTO 검증(class-validator). Prisma를 모른다
+- Controller: HTTP 요청/응답 변환, DTO 검증(class-validator). ORM을 모른다
 - Service: 업무 규칙 — 이벤트 검증 정책, 키-인스턴스 일치, 기간 검증, 지표 정의
-- Repository: Prisma/SQL 전담. 집계 SQL은 전부 여기에만
+- Repository: ORM(TypeORM)/SQL 전담. 집계 SQL은 전부 여기에만
 
 Port/Adapter를 도입하지 않은 근거: 3일 과제 규모에서 파일 수와 간접 참조만 늘고 실질
 이득(저장소 교체) 회수 시점이 없다. DB 접근이 Repository로 격리되어 있으므로 규모 확대

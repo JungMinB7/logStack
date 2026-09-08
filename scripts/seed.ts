@@ -9,7 +9,7 @@
  *
  * 실행: npm run seed
  */
-import { sendEvents } from '../scripts/send-events';
+import { sendEvents } from './send-events';
 import {
   DETERMINISTIC_EVENTS,
   EXPECTED_INGEST,
