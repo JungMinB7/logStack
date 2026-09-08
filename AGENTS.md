@@ -19,6 +19,7 @@ Controller → Service → Repository 3층 구조가 의도된 결정이다 (ADR
 (Controller의 Prisma 직접 호출, Repository 밖의 SQL)을 찾아라.
 
 ## 인프라 규칙 (AWS 고도화)
+- infra/ 작업 전 infra/AGENTS.md를 읽고, 위임받은 에이전트도 직접 읽는다.
 - 에이전트는 terraform apply·destroy를 실행하지 않는다. plan까지만. 실행은 사람.
 - 시크릿은 SSM Parameter Store(SecureString)에만. 코드·상태·로그에 평문 금지.
 - 인바운드 0.0.0.0/0 금지. SG는 plan-aws.md §1 체인만 허용.

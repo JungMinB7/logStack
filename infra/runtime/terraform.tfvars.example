@@ -1,0 +1,16 @@
+# TEMPLATE ONLY: never plan with the placeholder account.
+aws_account_id = "REPLACE_WITH_APPROVED_ACCOUNT_ID"
+project        = "logstack-demo"
+environment    = "demo"
+availability_zones = {
+  a = "ap-northeast-2a"
+  c = "ap-northeast-2c"
+}
+# No bucket/path is approved yet. Empty = no S3 access through this endpoint.
+s3_read_paths = {}
+# After approval only, replace the map above with entries of this shape:
+# ssm_agent = {
+#   bucket = "APPROVED_EXACT_BUCKET_NAME"
+#   prefix = "APPROVED_AGENT_PATH/"
+#   roles  = ["sender", "receiver", "db"]
+# }

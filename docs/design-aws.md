@@ -51,15 +51,32 @@
  
 ## 3. 보안 설계
  
-**원칙: 인터넷에서 직접 닿는 리소스 0개.**
+**원칙: EC2는 인터넷에 직접 공개하지 않는다. 외부 ALB만 승인 CIDR에 제한된 HTTPS 접근을 제공한다.**
  
 - 모든 인스턴스는 퍼블릭 IP 없음. 운영 접근은 SSM Session Manager(SSH 키·배스천·인바운드
   포트 전무). 감사 로그가 CloudTrail에 남는 부수 효과
 - 보안 그룹 최소 권한 체인: sender→(443)→ALB→(3000)→receiver→(5432)→DB.
-  각 규칙의 소스는 CIDR가 아니라 **앞 단계 SG 참조**로만 허용 — 어떤 SG에도 0.0.0.0/0 인바운드 없음
+  서비스 간 규칙은 **앞 단계 SG 참조**로 허용한다. 외부 ALB의 승인 CIDR ingress는 명시적 예외이며
+  어떤 SG에도 0.0.0.0/0·::/0 ingress를 허용하지 않는다. 실제 CIDR 미입력 시 외부 ALB SG ingress는 비워 둔다.
 - 인증 이중화: 전송 구간은 ALB의 TLS + 애플리케이션의 Bearer 키·instance_id 일치 검증
   (과제 §5.4 그대로). 키는 SSM SecureString에서 부팅 시 주입, 코드·AMI에 미포함
 - DB 계정은 애플리케이션 전용 계정 분리, 수퍼유저 원격 접속 차단
+
+### T4 네트워크·관리 통신 승인 (2026-09-09)
+
+정확한 서비스 SG5+vpce-sg1, 승인된 6개 CIDR/RT 및 관리 통신 표는 plan-aws.md §1과
+infra/T4_STATUS.md를 따른다. AZ a/c는 후보이며 실제 계정의 일반 AZ·서비스 지원·CIDR 충돌은 미확인이다.
+Public NAT1은 public-A, app-A/B 기본 경로는 같은 NAT, 데이터 RT에는 인터넷 기본 경로가 없다.
+ssm/ssmmessages/logs Interface Endpoint를 앱 2 AZ에 배치하고 VPC DNS·Private DNS를 사용한다.
+S3 Gateway Endpoint는 앱·데이터 RT에 연결한다. ec2messages/KMS 등 추가 Endpoint는 별도 근거·승인 대상이다.
+서비스 egress와 별도로 EC2 SG→vpce-sg TCP443, 필요한 EC2 SG→S3 prefix list TCP443을 허용한다.
+sender/receiver의 외부 패키지 공급은 NAT 경유 0.0.0.0/0 TCP443 egress를 허용한다.
+이는 도메인별 제한이 아니며 ingress 공개 승인이 아니다. HTTP80·전체 포트 egress를 추가하지 않는다.
+DB는 Endpoint·승인된 S3 경로만 사용한다. PG16·SSM Agent·chrony가 준비된 신뢰 가능한 AMI를 우선하되
+AMI 존재·ID·제작/공급 비용·재현 절차는 T5 전에 확인한다. 없으면 S3 오프라인 대안을 별도 승인받는다.
+T4에 빌더 EC2·새 AMI·Image Builder 또는 DB 임시 인터넷 경로를 만들지 않는다.
+T4 IAM은 관리 기반만 다루고 비밀값 조회를 관성적으로 허용하지 않는다. 후속 역할별 이름/ARN·최소 권한을 정해
+인스턴스 런타임에서 조회하며 Terraform은 실제값을 읽거나 저장하지 않는다.
 ## 4. 전송측(sender) 구현 명세 — 과제 §4의 실현
  
 sender 앱은 design.md §4를 코드로 옮긴 것이다. 핵심 동작:
@@ -117,11 +134,18 @@ gp3 EBS + 일일 스냅샷 + pg_dump cron(주기 [TBD])을 직접 구성하고, 
  
 ## 7. 배포 재현성 — ADR-004: Terraform 전면 코드화
  
-- 상태: S3 백엔드 (+ 잠금)
+- 상태: 기존 backend 존재·접근·잠금을 먼저 확인하여 재사용. 없으면 infra/bootstrap과 infra/runtime 분리
 - 리소스: VPC/서브넷/라우트/IGW/NAT/SG/IAM/SSM/EC2/ALB/ACM/Route53/CloudWatch 전부 코드
 - 인스턴스 초기화는 user_data 스크립트 (Node 설치, 코드 배포, systemd 등록) [D5]
-- 완료 기준: `terraform destroy` 후 `apply` 만으로 15분 내 전체 파이프라인 재가동,
-  수동 단계 0개
+- 최초 준비: 도구·로그인·상태 버킷·시크릿·기존 도메인/Zone·DB AMI 공급은 별도 사람 준비 단계다.
+  신규 bootstrap은 로컬 상태로 시작하며 존재하지 않는 자기 버킷을 backend로 참조하지 않는다.
+  버전 관리·공개 차단·암호화·HTTPS 강제·삭제 보호·force_destroy=false를 적용하고 사람만 최초 apply한다.
+  로컬 상태를 안전하게 보관하며 원격 이전·기존 잠금 교체는 자동 실행하지 않는다.
+  신규 runtime backend는 S3 use_lockfile=true(지원 Terraform 1.10 이상), 신규 DynamoDB 없음.
+- 완료 목표: 위 준비·보존 자원이 있는 반복 runtime destroy/apply에서 15분 내 파이프라인 재가동,
+  반복 부트스트랩 수동 설정 0개를 T8에서 실제 검증한다. 최초 준비나 사람의 apply/destroy 자체를 없앤다는 뜻이 아니다.
+- 상태 버킷·기존 도메인/Hosted Zone·공유 자원은 runtime 수명주기에서 제외한다.
+  T5의 receiver psql 확인은 T6 receiver 생성에 의존한다. DB 자체 점검과 구분하고 원래 연결 검증은 반드시 수행한다.
 - 에이전트 안전 규칙: AI는 plan까지만, apply/destroy는 사람이 실행 (AI_RULES 28)
 ## 8. ORM 전환 — ADR-005: Prisma → TypeORM
  
@@ -141,7 +165,12 @@ gp3 EBS + 일일 스냅샷 + pg_dump cron(주기 [TBD])을 직접 구성하고, 
 - CloudWatch Logs: sender·receiver의 구조화 로그(배치 카운터, 지연, 429 발생) 수집
 - 시계 동기화: 전 인스턴스 chrony — occurred_at 정확성의 전제 [A-3]를 인프라로 보장
 - 백업: EBS 일일 스냅샷 + pg_dump cron, 복구 리허설 1회 수행 후 절차 문서화
-- 비용 통제: 전 리소스 Project 태그, 데모 종료 시 destroy 운용 [D3]
+- 비용 통제: 지원 리소스에 Project=logstack-demo, Environment=demo (기존 확정 태그 미발견).
+  면접 시연 48~72시간 후 사람이 runtime을 destroy한다. 72시간은 금액 상한·연속 이벤트 생성 승인이 아니다.
+  T4 및 최종 구성의 48/72시간 비용·서울 단가·미확정은 infra/T4_STATUS.md, 보존/삭제는 infra/TEARDOWN.md에 기록한다.
+  기존 sender nano×10/receiver·DB small 각1과 권고 sender nano~micro×10/receiver·DB medium 각1을 구분한다.
+  역할별 타입·CPU credit Standard/Unlimited·용량은 T5/T7 전에 확인하며 12대 전체 medium으로 확정하지 않는다.
+  NAT·EIP·Endpoint는 시연 전 개발 대기 중에도 유지 과금된다. 보존 S3·snapshot·AMI·로그·DNS 잔존 비용도 별도 점검한다.
 ## 10. 실측 계획 (§10.7 정직성 원칙 유지)
  
 - AWS 환경에서 load-check 재실행: 이론 상한 20 req/s → 성공률·p50/p95, 로컬 대비 비교
@@ -169,6 +198,14 @@ gp3 EBS + 일일 스냅샷 + pg_dump cron(주기 [TBD])을 직접 구성하고, 
  
 **외부 노출 통제**: 외부 ALB는 IP 대역 제한 + 리스너 규칙으로 GET /api/v1/metrics/*와
 정적 파일만 포워드하고, 적재 경로는 404 고정 응답한다. 적재는 내부 ALB 전용.
+
+T6/T9 인계: 기존 public Hosted Zone·보유 도메인을 재사용하되 소유권/권한/위임을 실제 확인한다.
+미사용 dashboard.<보유 도메인>을 권고하며 FQDN·Zone ID·접속 CIDR은 아직 미입력이다.
+기존 Zone·등록 도메인을 runtime에 통째로 import하거나 apex/www/MX/NS/TXT를 덮어쓰지 않는다.
+T9 전용 Alias→외부 ALB→receiver, 같은 리전 ACM+DNS 검증을 사용한다. 공유 검증 레코드는 전용 삭제 대상으로 오인하지 않는다.
+HTTPS443만 열며 HTTP80 리다이렉트·TLS 검증 우회(-k)는 추가하지 않는다. 정적 파일·metrics GET 외 기본 응답 및
+정확한 /api/v1/event-batches는 404, ADMIN 인증은 유지한다. SG만으로 URL 차단을 구현했다고 보고하지 않는다.
+내부 적재 TLS/DNS는 T6, 외부 HTTPS·화면 실측은 T9 완료 조건이며 T4에서는 해당 리소스를 만들지 않는다.
  
 ## 12. 한계
  
@@ -178,4 +215,4 @@ gp3 EBS + 일일 스냅샷 + pg_dump cron(주기 [TBD])을 직접 구성하고, 
 - NAT 단일 AZ — 비용 절약 선택, AZ 장애 시 아웃바운드 상실
 - 대시보드 인증은 ADMIN 키 단일 공유 — 다인 사용 시 사용자별 계정·권한(예: Cognito)이
   필요하며 확장 방안으로 남김. IP 대역 제한이 1차 방어
-- [TBD-D1] 도메인 미확보 시: 자체 서명 인증서 + 전송측 검증 예외 — 보안상 열등함을 명시
+- D1은 보유 도메인 사용으로 확정됐다. 자체 서명 인증서·전송측 TLS 검증 예외는 채택하지 않는다.

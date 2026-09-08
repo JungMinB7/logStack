@@ -1,0 +1,5 @@
+# TEMPLATE ONLY: replace with approved non-secret identifiers before use.
+aws_account_id    = "REPLACE_WITH_APPROVED_ACCOUNT_ID"
+state_bucket_name = "REPLACE_WITH_APPROVED_NEW_STATE_BUCKET"
+project           = "logstack-demo"
+environment       = "demo"

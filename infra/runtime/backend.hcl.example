@@ -1,0 +1,7 @@
+# TEMPLATE ONLY: fill from the verified backend contract; no credentials here.
+bucket              = "REPLACE_WITH_VERIFIED_STATE_BUCKET"
+key                 = "REPLACE_WITH_APPROVED_RUNTIME_STATE_KEY"
+region              = "ap-northeast-2"
+allowed_account_ids = ["REPLACE_WITH_APPROVED_ACCOUNT_ID"]
+# Authentication uses the same externally configured AWS profile/SSO chain.
+# use_lockfile=true and encrypt=true are fixed in backend.tf.
