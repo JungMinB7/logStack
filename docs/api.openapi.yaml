@@ -8,6 +8,8 @@
 #          STORAGE_UNAVAILABLE 매핑), 429는 미구현 설계 계약임을 명기,
 #          occurred_at 시간대 지정자 필수, 청크형 비-JSON 400 명기,
 #          문자열 필드 minLength 추가
+# v2.2 (T2): 서버 측 rate limit 구현 — 429는 더 이상 미구현 계약이 아니며
+#          적재 경로에서 키 단위 고정 1분 창(기본 120회/분)으로 실제 발동한다
 
 openapi: 3.0.3
 info:
@@ -539,8 +541,10 @@ components:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
     RateLimited:
       description: |
-        서버 측 요청 한도 초과. (서버 측 rate limit은 현 구현 범위에서 미적용 —
-        전송측이 상대할 설계 계약으로 유지한다. design.md §13, README 한계 참조)
+        서버 측 요청 한도 초과 — 적재 경로에 키(=인스턴스) 단위 고정 1분 창
+        (기본 120회/분, env RATE_LIMIT_PER_MINUTE)으로 적용된다 [A-25].
+        인증(401/403)을 통과한 요청만 카운트하며, 429로 거절된 요청은
+        어떤 이벤트도 저장하지 않는다. (design-aws.md §5)
       headers:
         Retry-After:
           description: 재시도까지 대기 시간(초) — 전송측은 jitter를 더해 대기

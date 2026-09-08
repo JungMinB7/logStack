@@ -41,6 +41,7 @@ curl http://localhost:3000/health   # {"status":"ok"} 확인
 | `INGEST_API_KEY` | O (fail-closed) | 적재 API Bearer 키 (인스턴스별 키 — A-21) |
 | `INGEST_INSTANCE_ID` | O (fail-closed) | 위 키에 매핑된 인스턴스. 배치 내 instance_id와 불일치 시 403 |
 | `ADMIN_API_KEY` | O (fail-closed) | 지표 조회 Bearer 키 (적재 키와 반드시 상이) |
+| `RATE_LIMIT_PER_MINUTE` | X (기본 120) | 적재 경로의 키 단위 요청 한도 (고정 1분 창, 429 + Retry-After) |
 | `PORT` | X (기본 3000) | 서버 포트 |
 
 ## 3. 마이그레이션·시드
@@ -258,7 +259,9 @@ instance_id로 시뮬레이션**된다 (전송 패턴만 재현).
 29ms다. 순차 전송 모델의 인스턴스당 요청 간격 500ms 대비 약 17배 여유이며,
 배치 처리를 직렬로 가정해도 초당 30요청 이상을 소화하는 수준이다. **120회/분
 한도는 전송측 제약**이고, 서버는 배칭 수용(500건/4MB)과 멱등성(event_id PK)으로
-이 제약 하의 전송자를 지원한다(서버 측 rate limit·429는 미구현 — 아래 한계 참조).
+이 제약 하의 전송자를 지원한다. 서버 측 rate limit(키 단위 120회/분 고정 창,
+429 + Retry-After)은 자체 스로틀이 무너진 전송자에 대한 최후 방어선으로 구현되어
+있다(아래 한계의 인메모리 전제 참조).
 이 수치는 **로컬 docker 환경 기준**이며 운영 규모(수십억 행)의 보장이 아니다
 (design.md §10.7). 집계 쿼리의 인덱스 사용 실측은
 [docs/explain-results.md](docs/explain-results.md) 참조 (163k행에서 5개 쿼리 모두
@@ -309,9 +312,11 @@ first-write-wins(A-7).
 
 한계·미구현 (상세: design.md §16):
 
-- **서버 측 rate limit(429 + Retry-After) 미구현** — 전송측이 예산(120회/분의
-  50%)을 준수하는 정상 경로에서는 발동하지 않아 4순위로 미룸 (design.md §13).
-  계약(openapi)에는 정의되어 있음
+- **서버 측 rate limit은 인메모리 단일 수신 전제** — 적재 경로에 키(=인스턴스)
+  단위 고정 1분 창(기본 120회/분, `RATE_LIMIT_PER_MINUTE`)으로 429 + Retry-After를
+  반환한다. 카운터가 서버 프로세스 메모리에 있어 수신 서버를 다중화하면 실효
+  한도가 대수만큼 늘어나므로, 그 시점에는 공유 저장소 기반 분산 rate limit이
+  필요하다 (design.md §15 "다중 적재 서버")
 - Swagger UI, 에러 응답의 request_id 미구현 (계약상 선택 필드)
 - 환불·부분취소 미지원(총매출 기준), 다중 통화는 스키마·API 지원하되 샘플은 KRW
 - 운영 규모 raw 집계의 응답 시간 미보장 — 확장 경로는 design.md §15 (사전 집계, 큐)
