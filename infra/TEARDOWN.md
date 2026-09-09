@@ -2,6 +2,8 @@
 
 2026-09-09 현재: bootstrap은 사람이 적용했고 상태 버킷 logstack-bucket의 실제 존재·보호 설정을 확인했다.
 bootstrap/runtime 저장 plan의 독립 검토를 진행했으며 runtime은 아직 적용하지 않았다. 최신 검증·수용 결과는 T4_STATUS.md §12를 따른다.
+후속 T5는 승인된 AL2023 DB/EBS·S3 dump·DLM 코드 반영 상태이며 로그인 만료로 새 plan은 BLOCKED다([T5_STATUS.md §8](T5_STATUS.md)).
+T4 저장 plan은 T5를 포함하지 않는다. DB 데이터 보호와 백업/로그의 잔존 조건은 아래 §6을 따른다.
 아래는 실행한 삭제 기록이 아니다.
 실제 리소스 생성 후 담당자가 목록을 채우고 사람이 전체 runtime 삭제 계획을 검토·실행한다.
 48~72시간은 인프라 가동 계획이다. 종료 시각·완전 삭제 소요 시간·비용 0을 보장하지 않는다.
@@ -69,3 +71,30 @@ AMI deregistration과 backing snapshot 삭제는 같은 작업이 아니므로 �
 bootstrap 상태와 상태 버킷은 남긴다. 기존 도메인·Zone·필요 시크릿·승인된 AMI/공급 자료를 선행조건으로 확인한다.
 반복 runtime 재생성은 사람이 수행하고 T8에서 실제 시간을 측정한다. 최초 설치·로그인·backend 준비를 포함해
 15분 재현이 증명됐다고 쓰지 않는다. T3 로컬 소크 결과를 AWS 삭제/복구 증거로 재사용하지 않는다.
+
+## 6. T5 데이터 보존·잔존 비용 (아직 미배포)
+
+- DB instance/data EBS/attachment에는 prevent_destroy가 있다. user_data·AMI 변경도 instance 교체로
+  계획되어 보호에 걸린다. demo 종료를 위해 자동 해제하지 않는다. 데이터 인수·복구 검증 뒤 사람이
+  정확한 대상의 보호 전환과 새 전체 plan을 별도 승인한다. state 조작·force detach로 우회하지 않는다.
+- root gp3는 instance 종료 시 삭제 가능하므로 영속 PGDATA를 두지 않는다. `/srv/logstack-db/pgdata`와
+  local backup은 별도 data gp3이며 instance와 생명주기가 분리된다. 잔존 data EBS는 instance 정지/삭제 후에도
+  용량·초과 IOPS/throughput 비용이 계속된다. 삭제 보호 자체는 백업이나 AWS 콘솔 강제 삭제 방어가 아니다.
+- 승인된 DLM은 data volume만 일일03UTC(해당 시간 뒤 서비스 실행 창)/최근3개, dump는 일일02UTC 및
+  `logstack-db-backup-324037288068-ap-northeast-2/pg-dump/` 미버전 버킷/SSE-S3/7일 만료다.
+  현재 AWS 생성·스케줄 실행은 미실행이다. S3 실제 만료 삭제는 비동기이고 로컬 파일 만료가 아니다.
+  DLM 정책 중지/삭제 또는 원본 volume 삭제 뒤 남은 snapshot은 Terraform destroy가 정리한다고 보장하지 않는다.
+  실제 ID·소유자·복구 가능성·만료/보존 책임과 비용을 별도 인수한다. 상태 버킷은 dump 목적지가 아니다.
+- 전용 dump bucket은 prevent_destroy=true/force_destroy=false다. 보존할 경우 bucket뿐 아니라 lifecycle,
+  SSE/공개차단/ownership/TLS 정책 설정까지 유지하는 별도 승인 계획이 필요하다. 보조 lifecycle만 삭제하면
+  남은 객체의 7일 만료 동작도 제거될 수 있다. 삭제 보호로 전체 destroy plan이 막히면 자동 해제하지 않는다.
+  versioning은 이 단순 백업 버킷에 추가하지 않았다. 향후 versioning 도입은 noncurrent 보존까지 별도 결정한다.
+- CloudWatch 원격 수집은 T6 미구현 인계다. 향후 retained 로그/AMI backing snapshot/수동 복구 자료도 별도
+  비용·삭제 대상이며 승인 없는 강제 삭제/일괄 태그 삭제를 하지 않는다.
+- dump 실패 `.partial`, 업로드 실패 `.dump`, 마지막 정상 백업은 자동 삭제하지 않는다. 보존 정책과 디스크
+  적체 감시 책임자를 정하고 성공·복구 검증 전에 마지막 정상본을 지우지 않는다.
+- snapshot 복원으로 새 volume ID가 생기면 기존 볼륨 marker와 다르므로 자동 시작을 거부한다.
+  별도 승인된 복구 절차·원본/복원 ID·AZ·PG16/소유권 검증을 거쳐야 한다. 기존 볼륨을 mkfs하거나
+  marker/state를 임의 변경해 연결시키지 않는다. 실제 EC2 교체·dump restore·snapshot recovery는 미실행이다.
+- bootstrap 원본 로컬 state의 별도 암호화 보관은 여전히 미확인이다. T5_STATUS §2의 사람용 절차를 따르며
+  runtime S3 state와 혼동하지 않는다. 원본/T4 plan/잠금 버전/실행 증거는 자동 정리하지 않는다.

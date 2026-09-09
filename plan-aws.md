@@ -39,8 +39,8 @@
                         │      · 대시보드 정적 서빙 (T9, 외부 ALB 경유)             │
                         │         │ 5432                                         │
                         │  프라이빗-데이터 서브넷 ×2 (인터넷 경로 없음)              │
-                        │    PostgreSQL EC2 ×1 (t3.small, gp3 EBS)               │
-                        │      · EBS 스냅샷 + pg_dump cron 백업                   │
+                        │    PostgreSQL EC2 ×1 (t3.medium, gp3 EBS)              │
+                        │      · DLM 일일 스냅샷 + pg_dump 일일 timer 백업         │
                         └────────────────────────────────────────────────────────┘
 Route53: ACM 검증 + 내부 도메인 → 내부 ALB (적재 전용)
         + 공개 도메인 → **외부 ALB** → 수신 (동료용 대시보드 + 지표 API만 라우팅)
@@ -104,9 +104,13 @@ ssm/ssmmessages/logs Interface Endpoint는 앱 2 AZ에 배치하고 VPC DNS·Pri
 S3 Gateway Endpoint는 앱·데이터 RT에 연결한다. 추가 ec2messages/KMS Endpoint는 필요 근거와 별도 승인 대상이다.
 T4 SSM IAM 기반에는 비밀값 조회 권한을 관성적으로 넣지 않는다. 후속 역할별 이름/ARN·권한을 정하고
 실제 비밀값은 인스턴스 런타임에서 조회한다. 광범위 Allow에 좁은 Allow를 추가해 권한이 제한됐다고 간주하지 않는다.
-DB는 PG16·SSM Agent·chrony가 준비된 신뢰 가능한 AMI 공급 방식을 우선한다. 해당 AMI의 존재는 미확인이다.
-AMI ID·공급·비용·재현 절차는 T5 전에 확인하며, 없으면 S3 오프라인 대안을 별도 승인받는다.
-T4에서 이미지 빌더·새 AMI를 만들거나 DB에 임시 인터넷 경로를 열지 않는다. user_data 초기 설정은 유지한다.
+T5 후속 승인(2026-09-09): 공식 AL2023 고정 AMI + 고정 버전 S3 repository에서 user_data로 PG16을 설치한다.
+서울 AMI `ami-080417beadd39ca40`(Amazon owner `137112412989`, x86_64), release `2023.12.20260831`을 고정한다.
+공식 이미지의 SSM Agent와 chrony를 설치 단계에서 고정 패키지 버전·서비스 상태로 확인한다.
+S3 Gateway 정책은 `al2023-repos-ap-northeast-2-de612dc2`의 고정 GUID metadata와 종속성 공급용 `blobstore/` GetObject만 허용한다.
+공개 repository의 unsigned GET과 DB 역할의 백업 PutObject 권한을 구분하며 RPM·metadata GPG 검증을 적용한다.
+사전 준비 custom AMI/S3 offline bundle은 직접 공급 실패 시 별도 승인받을 대안으로 유지한다.
+이미지 빌더·새 AMI·DB 임시 인터넷 경로는 만들지 않는다. 실제 EC2 설치 성공은 사람 apply 후 검증 대상이다.
 외부 CIDR은 아직 미입력이다. T4 ext-alb-sg ingress는 비워 두고 T9 전에 실제 승인 CIDR을 받는다.
  
 ## 2. 사람이 결정해야 확정되는 것 (T0 블로커)
@@ -117,13 +121,13 @@ T4에서 이미지 빌더·새 AMI를 만들거나 DB에 임시 인터넷 경로
 | D2 | 리전 | 확정: ap-northeast-2 (서울) | AZ a/c 후보의 계정 지원은 미확인 |
 | D3 | 운용 방식 | 확정: 면접 시연 48~72시간 후 사람이 runtime destroy | 금액 상한·72시간 연속 이벤트 생성 승인은 아님 |
 | D4 | TypeORM 전환 이유 | 회사 스택 정렬 / 학습 | 회사 스택 정렬로 답변 준비 |
-| D5 | 배포 방식 | user_data 초기 설정 유지 | 앱은 HTTPS 공급, DB는 사전 준비 AMI 우선. Docker/ECR 자동 전환 없음 |
+| D5 | 배포 방식 | user_data 초기 설정 유지 | 앱은 HTTPS 공급, T5 DB는 공식 고정 AL2023 + 고정 S3 repo 설치 승인. custom AMI/offline은 대안, Docker/ECR 자동 전환 없음 |
 | D6 | 리포 구조 | 확정: 기존 리포에 infra/ | infra/bootstrap과 infra/runtime 분리 |
  
 48/72시간 비용은 `infra/T4_STATUS.md`의 서울 공식 단가·시간·수량·미확인 표를 기준으로 한다.
 기존 시간당 $0.25~0.30/월 20만원대는 Endpoint·공인 IPv4 등 근거가 부족한 과거 추정이며 확정 견적이 아니다.
 기존 타입은 sender t3.nano×10 + receiver/DB t3.small 각1이다. 권고 비용 시나리오는 receiver/DB t3.medium 각1,
-sender nano~micro×10 유지이며 실제 타입은 T5/T7 전에 확인한다. t3.medium×12로 확정하지 않는다.
+sender nano~micro×10 유지다. T5 DB만 t3.medium/CPU Standard로 확정했으며 receiver/sender 타입은 후속 단계에서 확인한다. t3.medium×12로 확정하지 않는다.
 Project 기본값 logstack-demo, Environment demo를 채택한다. 기존 확정 태그는 검색 범위에서 발견되지 않았다.
 T4를 일찍 apply하면 면접 외 대기 시간에도 NAT·EIP·Endpoint 유지 비용이 발생한다.
 
@@ -146,7 +150,7 @@ runtime은 준비된 backend를 사용한다. 상태 버킷·기존 도메인/Ho
 | T2 | **서버 rate limit 구현**: 인스턴스(키)별 120회/분 고정 창, 429 + Retry-After | e2e 추가: 121번째 요청 429, Retry-After 헤더, 창 리셋 후 200 |
 | T3 | **sender 앱 구현** (sender/): 이벤트 생성기(30명×0.5건/초) + outbox(파일) + 1초/500건/3MB 배칭 + 순차 전송 + §4.2 ACK 표 전체 + 지수 백오프 + 429 대기 + 60req/분 자체 스로틀 | 로컬에서 receiver 상대로 30분 무유실 가동, 강제 kill 후 재시작 시 outbox에서 이어서 전송, **drain 검증**: outbox에 5,000건을 쌓아둔 채 시작 → 최대 배치(500건)로 묶어 자체 스로틀 한도 내 최단 시간 소화 |
 | T4 | Terraform 네트워크: VPC, 서브넷 6개, IGW/Public NAT1+EIP, 서비스 SG5+관리 SG1, SSM IAM/Endpoint, 분리된 S3 backend | 각 실행 루트 validate + 실제 plan 독립 리뷰 통과. 코드/정적 검사만으로 완료 아님 |
-| T5 | Terraform DB: EC2 + 사전 준비 AMI 공급 확인 + user_data 초기 설정, gp3 EBS, 스냅샷·pg_dump 백업, chrony | DB 자체 점검 후 T6 receiver 생성에 의존하는 receiver psql 접속을 반드시 확인. 원래 검증 생략 없음 |
+| T5 | Terraform DB: 공식 고정 AL2023 EC2 + S3 repo user_data PG16 설치·초기 설정, gp3 EBS, DLM 일일 스냅샷(최근3개)·S3 일일 pg_dump(7일), chrony | DB 자체 점검 후 T6 receiver 생성에 의존하는 receiver psql 접속을 반드시 확인. 원래 검증 생략 없음 |
 | T6 | Terraform 수신: EC2 + user_data 배포, 내부 ALB + ACM + Route53, SSM 파라미터에서 키 주입 | SSM 포트포워딩으로 /health 200, 적재 curl 성공 |
 | T7 | Terraform 전송: count=10 인스턴스, 인스턴스별 키 매핑, systemd 서비스로 sender 가동 | CloudWatch에서 10대 전송 로그, DB에 유입 확인 |
 | T8 | **실측·시연·문서화**: AWS 위에서 load-check 재실행 + **장애 시나리오 3종 시연** — A) 수신 서버 60초 정지 → outbox 적체 → 재기동 후 drain, B) DB만 정지 → 503(재시도 대상) → 백오프 재전송 → 복구, C) 429 발동(1대 스로틀 해제 → Retry-After 대기 → 재개). 각 시나리오에서 생성 총건수 = DB 저장 건수, 유실 0 검증. 다이어그램, README-aws, destroy→apply 리허설 | infra-audit 통과, 15분 내 재현, 시나리오 3종 결과 기록 |

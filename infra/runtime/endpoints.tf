@@ -10,6 +10,9 @@ locals {
       Statement = [{
         Effect    = "Allow", Principal = "*", Action = local.ssm_actions, Resource = "*"
         Condition = { ArnEquals = { "aws:PrincipalArn" = local.role_arns } }
+        }, {
+        Effect    = "Allow", Principal = "*", Action = ["ssm:GetParameter"], Resource = local.db_parameter_arns
+        Condition = { ArnEquals = { "aws:PrincipalArn" = aws_iam_role.ec2["db"].arn } }
       }]
     })
     ssmmessages = jsonencode({
@@ -41,15 +44,29 @@ resource "aws_vpc_endpoint" "s3" {
   service_name      = "com.amazonaws.${local.region}.s3"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [for name in ["app_a", "app_c", "data_a", "data_c"] : aws_route_table.main[name].id]
-  policy = length(var.s3_read_paths) == 0 ? local.deny_all : jsonencode({
+  policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [for grant in values(var.s3_read_paths) : {
+    Statement = concat([for grant in values(var.s3_read_paths) : {
       Effect    = "Allow"
       Principal = "*"
       Action    = ["s3:GetObject"]
       Resource  = "arn:aws:s3:::${grant.bucket}/${grant.prefix}*"
       Condition = { ArnEquals = { "aws:PrincipalArn" = [for role in grant.roles : aws_iam_role.ec2[role].arn] } }
-    }]
+      }], [{
+      # DNF performs unsigned/public object GETs. PrincipalArn would deny it.
+      # No ListBucket, other buckets, HTTP, or S3 writes are authorized here.
+      Sid       = "PinnedAL2023RepositoryRead", Effect = "Allow", Principal = "*"
+      Action    = ["s3:GetObject"], Resource = local.db_repository_arns
+      Condition = { Bool = { "aws:SecureTransport" = "true" } }
+      }, {
+      Sid    = "DBOnlyApprovedDumpUpload", Effect = "Allow", Principal = "*"
+      Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.db_backup.arn}/${local.db_backup_prefix}*"
+      Condition = {
+        ArnEquals    = { "aws:PrincipalArn" = aws_iam_role.ec2["db"].arn }
+        StringEquals = { "s3:x-amz-server-side-encryption" = "AES256" }
+        Bool         = { "aws:SecureTransport" = "true" }
+      }
+    }])
   })
   tags = { Name = "${local.name}-s3" }
 }

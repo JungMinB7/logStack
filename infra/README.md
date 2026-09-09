@@ -1,5 +1,10 @@
 # T4 Terraform 실행·입력 계약
 
+현재 후속 단계는 [T5_STATUS.md §8](T5_STATUS.md#8-t5-결정-보완al2023-검증-재개-2026-09-09-kst)이다.
+승인된 공식 고정 AL2023/S3 repo 설치, DB/EBS, DB-only SSM 조회, 일일 S3 dump와 DLM 스냅샷을
+코드에 반영했다. **AWS 로그인 만료로 새 전체 plan BLOCKED / runtime 미배포**다.
+아래 생성60개 및 T4 수용은 과거 기준선이다. 이전 저장 plan은 T5 소스를 포함하지 않아 현재 적용에 사용하지 않는다.
+
 2026-09-09 실행 검증 재개: 사용자 전용 Terraform/AWS CLI 설치, fmt/check, 양 root의 backend 없는 init/validate를 완료했다.
 도구·정적 검증은 [T4_STATUS.md §10](T4_STATUS.md#10-t4-실행-검증-재개-2026-09-09-kst),
 bootstrap plan 이력은 [§11](T4_STATUS.md#11-승인-입력으로-신규-bootstrap-실제-plan-2026-09-09-kst),
@@ -21,7 +26,9 @@ runtime 실제 S3 backend init·validate 성공 후 plan은 exit2, **60 add / 0 
   VPC가 자동 생성한 default SG도 규칙을 비워 사용을 방지한다(추가 서비스 SG가 아님).
   코드의 `_c` 서브넷 key는 승인 표의 public-B/app-B/data-B이며 AZ c 후보에 대응한다.
   local main RT는 기본 local 경로만 남으며 서브넷6개는 모두 명시적 RT에 연결한다.
-  EC2·ALB 본체·DB·DNS·인증서·시크릿은 아직 없다.
+  T5 후속에서 DB EC21·독립 data gp3·attachment 소스를 추가했다. 아직 배포되지 않았으며
+  `db` 필수 객체와 승인된 AMI/release·하드웨어/역할/키 일치 precondition이 있다.
+  DB 전용 S3 backup/DLM을 같은 루트에 추가했다. ALB/DNS/인증서·시크릿 값 리소스는 없다.
 
 Terraform 제약 `>=1.10.0,<2.0.0`, AWS provider `~>6.0`은 유지한다. 실행 CLI는 Terraform 1.14.9다.
 양 루트 실제 init은 HashiCorp 서명의 AWS provider 6.63.0을 설치하고 각각 `.terraform.lock.hcl`을 생성했다.
@@ -54,10 +61,18 @@ Terraform 제약 `>=1.10.0,<2.0.0`, AWS provider `~>6.0`은 유지한다. 실행
    사람이 대조한 기록을 남기는 것이 필수 gate다. 이 확인 전 실제 backend init/plan을 실행하지 않는다.
    계정과 backend에 연결하지 않는 `init -backend=false -input=false` 및 validate는 이 gate와 구분한다.
    별도 계정 backend는 별도 승인 전 사용하지 않는다. default workspace만 사용한다.
-4. S3 관리 버킷/경로는 T4 현재 미입력이고 로그 그룹/보존은 후속 단계다. 빈 계약으로 네트워크 코드는
-   plan 가능하지만 패키지 공급·로그 수집이 준비됐다는 뜻은 아니다. 후속 배포 전에 반드시 아래 계약을 채운다.
+4. T5의 공식 repo 읽기와 전용 backup PutObject는 승인·코드 반영됐다. 정확 경로는 아래 표를 따른다.
+   CloudWatch 원격 수집은 T6 인계이며 Logs Endpoint Deny 유지. 로컬 journald 실패 진단과 원격 수집을 혼동하지 않는다.
 
 ## 로컬 검증과 실제 plan 순서
+
+현재 T5에서는 아래 T4 재현 명령을 무조건 이어 실행하지 않는다. fmt/validate와
+`python3 -B -m unittest discover -s infra/test -p 'test_*.py' -v`만 로컬 검증할 수 있다.
+테스트는 실제 Terraform template 렌더·mock이며 EC2 디스크/DB/서비스를 조작하지 않는다.
+`runtime/db.tfvars.example`은 승인된 비밀 없는 입력 참고본이며 실제 ignored terraform.tfvars도 준비됐다.
+재로그인·계정 확인 후 정상 S3 backend 전체 plan과 독립 리뷰를 수행해야 한다. 이전 무조건 false gate는
+승인된 통합 코드와 구체 입력 precondition으로 대체했다. 검증 생략/DB 제외로 성공을 만들지 않는다.
+DB 설치/백업 스크립트는 사람 apply 후 EC2 runtime용이며 개발 머신에서 직접 실행하면 안 된다.
 
 저장소 루트에서 수행하는 재현 명령이다. 이번 실행의 개별 종료 코드·최초 오류·재시도는 §10과 ignored 로그를 확인한다.
 init은 provider 다운로드가 필요할 수 있다. 네트워크가 막히면 정식 도구 승인으로 재시도하며 정책·서명 검증은 우회하지 않는다.
@@ -102,8 +117,8 @@ Git ignore는 보존 수단이 아니다. 로컬 상태 분실 시 재생성하�
 
 backend 변경/이전 질문이 나오면 중단한다. `-migrate-state`, `-reconfigure`, `-lock=false`, force-unlock을 자동 사용하지 않는다.
 실제 plan은 코드와 함께 독립 검토하고 사람 apply 대기로 둔다. plan/state 전체는 출력·Git 커밋하지 않는다.
-현재 bootstrap plan은 6생성/0변경/0삭제/0교체, runtime plan은 **60생성/0변경/0삭제/0교체**다.
-현재 실제 runtime 저장 plan의 정확한 경로·SHA와 독립 리뷰·사람 적용 인계는 §12를 사용한다.
+과거 T4 기준선의 bootstrap plan은 6생성/0변경/0삭제/0교체, runtime plan은 **60생성/0변경/0삭제/0교체**였다.
+이전 runtime 저장 plan의 정확한 경로·SHA와 독립 리뷰 이력은 T4_STATUS §12를 사용한다. 현재 T5 새 plan은 인증 만료로 BLOCKED다.
 저장 plan apply는 추가 확인 질문 없이 실행될 수 있다. runtime VPC/NAT/Endpoint apply까지 승인된 것으로 보지 않는다.
 
 ## Backend 접근 권한
@@ -127,16 +142,19 @@ state 객체 DeleteObject는 필요하지 않다. 다른 workspace 경로·버�
 | sender→int-alb TCP443 | 양방향 명시적 SG 참조 규칙 | T6 TLS/API 구현 대기 |
 | int/ext-alb→receiver TCP3000 | SG 참조 | ALB 본체 없음, ext ingress 빈 상태 |
 | receiver→db TCP5432 | SG 참조 | T5/T6 배포 대기 |
-| sender/receiver/db→vpce TCP443 | 각 EC2 SG→vpce / 역방향 ingress | ssm/ssmmessages는 아래 채널만, 역할 ARN 제한 |
+| sender/receiver/db→vpce TCP443 | 각 EC2 SG→vpce / 역방향 ingress | 관리 channel 및 DB-only Parameter 조회, 역할 ARN 제한 |
 | sender/receiver→외부 TCP443 | 0.0.0.0/0 egress, app RT→public-A NAT | 도메인 제한 아님; HTTP80 없음 |
-| 승인 역할→S3 TCP443 | 입력 역할만 S3 prefix-list egress, app/data RT→Gateway | `s3_read_paths`의 정확한 버킷/접두사 GetObject만 |
+| DB→S3 TCP443 | DB S3 prefix-list egress, data RT→Gateway | 공식 repo GUID metadata+blobstore unsigned GetObject, DB 전용 dump prefix PutObject |
+| 추가 승인 역할→S3 TCP443 | `s3_read_paths` 입력 역할 egress | 추가 Agent 공급용 정확 버킷/prefix GetObject만 |
 | CloudWatch Logs | logs Interface Endpoint 2AZ·Private DNS | 기본 Deny all, 그룹·보존·최소 권한 후속 확정 필요 |
-| DB→인터넷 | 기본 경로/광범위 egress 없음 | AMI 또는 별도 승인 오프라인 공급, T5 전 해결 |
+| DB→인터넷 | 기본 경로/광범위 egress 없음 | 공식 AL2023 + S3 repo 공급. custom AMI/offline은 실패 시 대안 |
 
 SSM 역할은 `ssm:UpdateInstanceInformation`과 `ssmmessages`의 Create/Open Control/Data Channel만 허용한다.
 채널 API는 Resource `*`가 필요하므로 Endpoint에서 역할 ARN을 제한한다. 이 기반은 modern SSM Agent Session Manager용이며
 [AmazonSSMManagedInstanceCore](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonSSMManagedInstanceCore.html) 전체 기능을 제공하지 않는다.
-GetParameter(s), KMS decrypt, inventory, association, patching, Agent 자동 업데이트 권한은 기본에서 제외한다.
+T5에서 DB 역할/SSM Endpoint에만 두 정확 Parameter ARN의 GetParameter를 추가했다. receiver는 T6 대상이다.
+GetParameters/ByPath/History, inventory, association, patching, Agent 자동 업데이트 권한은 제외한다.
+SecureString은 확인된 alias/aws/ssm이며 별도 KMS Endpoint/키 생성/광범위 KMS 허용은 추가하지 않는다.
 T5~T7 전에 실제 AMI Agent 버전과 세션 동작을 검증하고 필요한 기능만 승인받아 추가한다.
 운영자의 StartSession/포트포워딩 권한·대상 제한은 별도 operator 정책이다. 현재 인스턴스/세션 실측은 없다.
 
@@ -149,8 +167,11 @@ SSH·포트포워딩에는 Session Manager 세션 로깅이 지원되지 않으�
 대응하지만, Agent·operator·preferences·연결 실측까지 완료됐다는 뜻은 아니다.
 
 S3 입력은 역할별 승인된 Agent/패키지 공급 read-only 경로다. `prefix`는 비어 있지 않고 `/`로 끝나며 wildcard를 포함할 수 없다.
-코드는 그 아래 객체에만 `s3:GetObject`를 허용하고, 같은 범위로 IAM/Endpoint/SG를 생성한다. ListBucket·쓰기·백업 권한은 없다.
-빈 `{}`이면 S3 Endpoint는 명시적 Deny all이며 DB의 S3 egress도 없다. 승인되지 않은 버킷을 임의로 선별하지 않았다.
+이 추가 입력의 범위는 GetObject뿐이다. T5 별도 고정 정책은 공식 AL2023 bucket의 정확 GUID metadata와
+종속 패키지 `blobstore/`에 unsigned GET을 허용한다(해당 repo의 모든 blob을 포함하는 잔여 범위).
+DNF는 고정 release/baseurl·상위 NEVRA·RPM/metadata GPG·TLS 검증을 사용하고 weak deps/fallback을 차단한다.
+DB role만 `logstack-db-backup-324037288068-ap-northeast-2/pg-dump/*`에 AES256 PutObject할 수 있다.
+현재 `s3_read_paths={}`라도 이 승인된 T5 정책/DB egress는 존재한다. ListBucket·다른 버킷·범용 쓰기는 없다.
 AWS 관리 버킷은 [SSM VPC 문서](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-create-vpc.html)의 기능/Agent 버전에 맞춰
 정확한 지역별 버킷/경로를 승인한다. 필요한 cross-account bucket policy·서명 다운로드 지원을 별도로 확인한다.
 S3 endpoint policy는 IAM을 대체하지 않는다. 후속 비밀값 권한도 역할별 정확한 ARN으로 분리한다.
@@ -159,6 +180,8 @@ S3 endpoint policy는 IAM을 대체하지 않는다. 후속 비밀값 권한도 
 
 runtime outputs는 VPC/CIDR, subnet ID/AZ/CIDR, RT, gateway/EIP allocation ID, SG6, Endpoint/S3 prefix-list,
 역할 ARN/instance profile이다. 비밀값은 없다. 후속 단계는 이 runtime 루트를 확장하며 같은 네트워크를 새 루트로 복제하지 않는다.
+T5 output은 DB instance/private IP/data volume/AZ/role·Parameter ARN, dump bucket/prefix, DLM policy/role/schedule이다.
+일일 dump02UTC/S3 7일 만료와 DLM03UTC/최근3개는 실제 실행/복원 성공 증거가 아니다.
 provider default_tags로 Project=logstack-demo, Environment=demo를 적용한다. Name은 개별 자원에 적용한다.
 태그 비지원 예외: 개별 route/RT association, IAM inline policy, S3의 policy/versioning/encryption/public-access/ownership 보조 설정.
 S3 보조 설정은 태그된 버킷에 속한다. 기본 main RT/NACL은 AWS 생성 객체로 새 관리 자원으로 인수하지 않았다.

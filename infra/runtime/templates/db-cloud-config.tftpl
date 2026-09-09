@@ -1,0 +1,13 @@
+#cloud-config
+${jsonencode({
+  package_update = false
+  package_upgrade = false
+  write_files = files
+  # cloud-init does not add errexit between runcmd entries. A single fail-fast
+  # command preserves installer/PG failure and never enables backup afterward.
+  runcmd = [["/bin/bash", "-e", "-c", join("\n", [
+    "systemctl daemon-reload",
+    "systemctl enable --now logstack-postgresql.service",
+    "systemctl enable --now logstack-db-backup.timer"
+  ])]]
+})}

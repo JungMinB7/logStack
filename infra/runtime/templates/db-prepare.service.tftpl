@@ -1,0 +1,16 @@
+[Unit]
+Description=Verify DB data volume and prepare PG16 without network clients
+Wants=network-online.target
+Requires=logstack-db-install.service ${ssm_service} ${chrony_service}
+After=network-online.target logstack-db-install.service ${ssm_service} ${chrony_service}
+Before=logstack-postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/logstack/db-bootstrap.sh prepare
+RemainAfterExit=yes
+TimeoutStartSec=600
+UMask=0077
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal

@@ -6,7 +6,7 @@ locals {
     ext_receiver = { source = "ext-alb", target = "receiver", port = 3000 }
     receiver_db  = { source = "receiver", target = "db", port = 5432 }
   }
-  s3_roles = toset(flatten([for grant in values(var.s3_read_paths) : tolist(grant.roles)]))
+  s3_roles = setunion(toset(["db"]), toset(flatten([for grant in values(var.s3_read_paths) : tolist(grant.roles)])))
 }
 
 resource "aws_security_group" "main" {

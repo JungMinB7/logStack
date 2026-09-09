@@ -72,9 +72,14 @@ S3 Gateway Endpoint는 앱·데이터 RT에 연결한다. ec2messages/KMS 등 �
 서비스 egress와 별도로 EC2 SG→vpce-sg TCP443, 필요한 EC2 SG→S3 prefix list TCP443을 허용한다.
 sender/receiver의 외부 패키지 공급은 NAT 경유 0.0.0.0/0 TCP443 egress를 허용한다.
 이는 도메인별 제한이 아니며 ingress 공개 승인이 아니다. HTTP80·전체 포트 egress를 추가하지 않는다.
-DB는 Endpoint·승인된 S3 경로만 사용한다. PG16·SSM Agent·chrony가 준비된 신뢰 가능한 AMI를 우선하되
-AMI 존재·ID·제작/공급 비용·재현 절차는 T5 전에 확인한다. 없으면 S3 오프라인 대안을 별도 승인받는다.
-T4에 빌더 EC2·새 AMI·Image Builder 또는 DB 임시 인터넷 경로를 만들지 않는다.
+DB는 Endpoint·승인된 S3 경로만 사용한다. T5 후속 승인(2026-09-09)은 공식 AL2023 고정 AMI
+`ami-080417beadd39ca40`(Amazon owner `137112412989`, x86_64), release `2023.12.20260831`과
+서울 `al2023-repos-ap-northeast-2-de612dc2`의 고정 repository를 통한 user_data PG16 설치다.
+SSM Agent·chrony·AWS CLI도 고정 패키지/서비스 검사를 수행한다. RPM 및 metadata 서명 검증을 유지한다.
+Endpoint의 공개 repo unsigned GetObject는 고정 GUID metadata와 종속성에 필요한 `blobstore/`로 제한한다.
+DB 역할의 두 SecureString GetParameter 및 별도 백업 prefix PutObject와 공개 패키지 읽기를 구분한다.
+custom AMI/S3 offline bundle은 공급 실패 시 별도 승인할 대안이다. 빌더·새 AMI·임시 인터넷 경로는 추가하지 않는다.
+공식 AMI/repo 메타데이터 확인은 실제 EC2 설치 성공 증거가 아니며, 상세 고정값·검증은 infra/T5_STATUS.md에 기록한다.
 T4 IAM은 관리 기반만 다루고 비밀값 조회를 관성적으로 허용하지 않는다. 후속 역할별 이름/ARN·최소 권한을 정해
 인스턴스 런타임에서 조회하며 Terraform은 실제값을 읽거나 저장하지 않는다.
 ## 4. 전송측(sender) 구현 명세 — 과제 §4의 실현
@@ -129,15 +134,26 @@ T2의 429는 최후 방어선이며 sender의 1차 한도 준수 책임을 대�
 그 가치를 체감하는 것이 목적의 일부
  
 **감수하는 것**: 관리형 서비스가 제공하는 자동 페일오버·시점 복구 없음. 대응으로
-gp3 EBS + 일일 스냅샷 + pg_dump cron(주기 [TBD])을 직접 구성하고, 이 운영 부담이
+gp3 EBS + DLM 일일 data 볼륨 스냅샷(최근3개) + 일일 pg_dump systemd timer를 구성하고, 이 운영 부담이
 곧 "실서비스라면 RDS를 선택할 이유"임을 인정한다.
+
+T5 승인값은 data_a의 t3.medium/CPU Standard, root20GiB/data100GiB gp3(각3000IOPS/125MiB/s),
+AWS 관리 EBS 키 암호화와 data 삭제 방지다. DB `gamelogs`의 migration owner `logstack_migrator`와
+runtime DML `logstack_app`을 분리한다. 기존 `/logstack/demo/db/migration-password` 및
+`/logstack/demo/db/application-password`(SecureString, `alias/aws/ssm`)를 런타임에서만 읽는다.
+DB에는 snapshot EC2 API 권한이나 추가 Endpoint를 주지 않고 별도 DLM 서비스 역할이 실행한다.
+dump는 상태 버킷과 별개인 `logstack-db-backup-324037288068-ap-northeast-2/pg-dump/`에 저장한다.
+SSE-S3·공개 차단·미버전 버킷의 7일 만료를 적용한다. 실제 만료 삭제는 비동기이며 로컬 dump 자동 삭제는 없다.
+로컬 용량 점검과 DLM 중단/정책·원본 볼륨 삭제 뒤 잔존 snapshot 보존·정리는 운영 인계 대상이다.
+쓰기 중 snapshot은 crash-consistent 수준이며 실제 dump/snapshot 복원 검증을 대체하지 않는다.
  
 ## 7. 배포 재현성 — ADR-004: Terraform 전면 코드화
  
 - 상태: 기존 backend 존재·접근·잠금을 먼저 확인하여 재사용. 없으면 infra/bootstrap과 infra/runtime 분리
 - 리소스: VPC/서브넷/라우트/IGW/NAT/SG/IAM/SSM/EC2/ALB/ACM/Route53/CloudWatch 전부 코드
 - 인스턴스 초기화는 user_data 스크립트 (Node 설치, 코드 배포, systemd 등록) [D5]
-- 최초 준비: 도구·로그인·상태 버킷·시크릿·기존 도메인/Zone·DB AMI 공급은 별도 사람 준비 단계다.
+- 최초 준비: 도구·로그인·상태 버킷·시크릿·기존 도메인/Zone·고정 공식 DB AMI/repo 접근 확인은 별도 준비 단계다.
+  T5의 기본 공급은 공식 AL2023에서 user_data 설치이며 custom AMI 제작이 필수 선행 단계는 아니다.
   신규 bootstrap은 로컬 상태로 시작하며 존재하지 않는 자기 버킷을 backend로 참조하지 않는다.
   버전 관리·공개 차단·암호화·HTTPS 강제·삭제 보호·force_destroy=false를 적용하고 사람만 최초 apply한다.
   로컬 상태를 안전하게 보관하며 원격 이전·기존 잠금 교체는 자동 실행하지 않는다.
@@ -164,12 +180,14 @@ gp3 EBS + 일일 스냅샷 + pg_dump cron(주기 [TBD])을 직접 구성하고, 
  
 - CloudWatch Logs: sender·receiver의 구조화 로그(배치 카운터, 지연, 429 발생) 수집
 - 시계 동기화: 전 인스턴스 chrony — occurred_at 정확성의 전제 [A-3]를 인프라로 보장
-- 백업: EBS 일일 스냅샷 + pg_dump cron, 복구 리허설 1회 수행 후 절차 문서화
+- 백업: DLM 일일 data 스냅샷(최근3개) + 일일 pg_dump timer/S3 7일 만료. 복구 리허설 1회 후 절차 문서화
+- T5의 DB 진단은 비밀 제외 로컬 journald/cloud-init 상태로 준비하며 원격 CloudWatch 수집은 미구현 인계다.
+  T6에서 수집 범위·권한을 확인한다. 기존 Logs Endpoint Deny를 수집 완료로 해석하지 않는다.
 - 비용 통제: 지원 리소스에 Project=logstack-demo, Environment=demo (기존 확정 태그 미발견).
   면접 시연 48~72시간 후 사람이 runtime을 destroy한다. 72시간은 금액 상한·연속 이벤트 생성 승인이 아니다.
   T4 및 최종 구성의 48/72시간 비용·서울 단가·미확정은 infra/T4_STATUS.md, 보존/삭제는 infra/TEARDOWN.md에 기록한다.
   기존 sender nano×10/receiver·DB small 각1과 권고 sender nano~micro×10/receiver·DB medium 각1을 구분한다.
-  역할별 타입·CPU credit Standard/Unlimited·용량은 T5/T7 전에 확인하며 12대 전체 medium으로 확정하지 않는다.
+  T5 DB만 medium/Standard/root20+data100GiB로 확정했다. receiver/sender는 후속 단계 결정이며 12대 전체 medium으로 확정하지 않는다.
   NAT·EIP·Endpoint는 시연 전 개발 대기 중에도 유지 과금된다. 보존 S3·snapshot·AMI·로그·DNS 잔존 비용도 별도 점검한다.
 ## 10. 실측 계획 (§10.7 정직성 원칙 유지)
  

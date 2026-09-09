@@ -1,0 +1,24 @@
+[Unit]
+Description=logStack PostgreSQL 16
+Requires=logstack-db-prepare.service
+After=logstack-db-prepare.service
+ConditionPathIsMountPoint=/srv/logstack-db
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+ExecStartPre=+/usr/local/lib/logstack/db-bootstrap.sh verify
+ExecStart=${pg_bin}/postgres -D /srv/logstack-db/pgdata
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGINT
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=5
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

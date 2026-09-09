@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily logStack PG16 dump and acknowledged S3 upload
+Requires=logstack-postgresql.service
+After=logstack-postgresql.service network-online.target
+ConditionPathIsMountPoint=/srv/logstack-db
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/logstack/db-backup.py
+TimeoutStartSec=7200
+UMask=0077
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal

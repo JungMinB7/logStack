@@ -1,0 +1,29 @@
+# Approved non-secret T5 input reference. Keep actual inputs ignored.
+# Account, AMI and repository release must be rechecked before a new plan.
+# No password, token, secret digest or secret plaintext belongs here.
+# The existing custom-AMI manifest example is historical, not needed for AL2023.
+db = {
+  ami_id                  = "ami-080417beadd39ca40"
+  ami_owner               = "137112412989"
+  architecture            = "x86_64"
+  al2023_release          = "2023.12.20260831"
+  instance_type           = "t3.medium"
+  subnet_key              = "data_a"
+  cpu_credits             = "standard"
+  root_gib                = 20
+  root_iops               = 3000
+  root_throughput_mibps    = 125
+  data_gib                = 100
+  data_iops               = 3000
+  data_throughput_mibps    = 125
+  ebs_kms_key_arn          = "arn:aws:kms:ap-northeast-2:324037288068:key/f6ed82b3-880c-46c9-a2fc-d5e77e71e80c"
+  allow_blank_volume_init = true # Only new Terraform-owned volume. Never resets an existing marker/PGDATA.
+  database                = "gamelogs"
+  migration_role          = "logstack_migrator"
+  application_role        = "logstack_app"
+  migration_secret_arn    = "arn:aws:ssm:ap-northeast-2:324037288068:parameter/logstack/demo/db/migration-password"
+  application_secret_arn  = "arn:aws:ssm:ap-northeast-2:324037288068:parameter/logstack/demo/db/application-password"
+  pg_bin                  = "/usr/bin"
+  ssm_service             = "amazon-ssm-agent.service"
+  chrony_service          = "chronyd.service"
+}

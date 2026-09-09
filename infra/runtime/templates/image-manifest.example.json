@@ -1,0 +1,19 @@
+{
+  "os_id": "<REVIEWED_OS_ID>",
+  "os_version": "<EXACT_OS_VERSION>",
+  "architecture": "<x86_64_OR_arm64>",
+  "build_record": "<NON_SECRET_REPRODUCIBLE_BUILD_RECORD_REFERENCE>",
+  "pg_major": 16,
+  "pg_bin": "<ABSOLUTE_PG16_BINARY_DIRECTORY>",
+  "vendor_pg_services_disabled": true,
+  "no_baked_cluster": true,
+  "vendor_pg_services": ["<VENDOR_PG_SERVICE_NAME.service>"],
+  "vendor_data_directories": ["<ALL_VENDOR_DEFAULT_CLUSTER_DIRECTORIES>"],
+  "tools": {
+    "aws_version": "<EXACT_AWS_CLI_VERSION_STRING>",
+    "chrony_version": "<EXACT_CHRONY_VERSION_STRING>",
+    "cloud_init_version": "<EXACT_CLOUD_INIT_VERSION_STRING>",
+    "ssm_agent_binary": "<ABSOLUTE_AGENT_BINARY_PATH>",
+    "ssm_agent_version": "<EXACT_AGENT_VERSION_STRING>"
+  }
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Install pinned AL2023 PG16 packages from the approved S3 repository
+Wants=network-online.target
+After=network-online.target
+Before=logstack-db-prepare.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/logstack/db-install.sh
+RemainAfterExit=yes
+TimeoutStartSec=900
+UMask=0077
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
